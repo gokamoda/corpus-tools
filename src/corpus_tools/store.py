@@ -21,11 +21,13 @@ written under a temporary name and renamed last, so a file (or shard
 directory) that exists is complete.
 """
 
+import atexit
 import itertools
 import json
 import multiprocessing
 import os
 import shutil
+import sys
 from collections.abc import Iterable, Iterator
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from concurrent.futures.process import BrokenProcessPool
@@ -661,11 +663,21 @@ def _workers(
 
 
 def _init_worker(tokenizer: Any, threads: int, positions: Any, lock: Any) -> None:
+    # A worker that left a stream before its end (max_documents, an error)
+    # would never exit, as any process (see corpus.run_and_exit), and the
+    # executor would wait for it forever: the worker ends at once instead.
+    atexit.register(_end_worker)
     # read by the tokenizer (Rust's rayon) when it first tokenizes a batch
     os.environ["RAYON_NUM_THREADS"] = str(threads)
     tqdm.set_lock(lock)
     _worker["tokenizer"] = tokenizer
     _worker["position"] = positions.get()
+
+
+def _end_worker() -> None:
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(0)
 
 
 def _count_shard_in_worker(task: _Task) -> int:

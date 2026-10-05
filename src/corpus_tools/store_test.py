@@ -474,9 +474,12 @@ def test_worker_sets_the_tokenizer_threads(monkeypatch):
     lock = multiprocessing.get_context("spawn").RLock()
     monkeypatch.setattr(store_module.tqdm, "set_lock", lambda lock: None)
     monkeypatch.setattr(store_module, "_worker", {})
+    at_exit = []  # not to end this process (pytest) with os._exit
+    monkeypatch.setattr(store_module.atexit, "register", at_exit.append)
     store_module._init_worker("tokenizer", 4, positions, lock)
     assert store_module.os.environ["RAYON_NUM_THREADS"] == "4"
     assert store_module._worker == {"tokenizer": "tokenizer", "position": 3}
+    assert at_exit == [store_module._end_worker]
 
 
 def test_cli_needs_an_output_dir(tmp_path, reads, monkeypatch, capsys):

@@ -68,3 +68,32 @@ def test_run_and_exit_ends_a_process_that_left_a_stream():
     )
     result = subprocess.run([sys.executable, "-c", code], timeout=120, check=False)
     assert result.returncode == 0
+
+
+def test_worker_that_left_a_stream_ends(tmp_path):
+    # Without _end_worker, the worker does not exit after leaving the stream,
+    # and the count waits for it forever.
+    import os
+    import signal
+    import subprocess
+    import sys
+
+    code = (
+        "from corpus_tools import Store, preset\n"
+        "if __name__ == '__main__':\n"
+        f"    Store({str(tmp_path / 'out')!r}, cache_dir={str(tmp_path / 'cache')!r})"
+        ".counts(preset('openwebtext'), 'openai-community/gpt2', [1],"
+        " max_documents=200, cpus=1)\n"
+    )
+    # in its own process group, so that a hung worker is killed with it
+    process = subprocess.Popen(
+        [sys.executable, "-c", code],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    try:
+        assert process.wait(timeout=300) == 0
+    finally:
+        if process.poll() is None:
+            os.killpg(process.pid, signal.SIGKILL)
