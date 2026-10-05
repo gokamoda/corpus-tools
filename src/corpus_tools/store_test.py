@@ -496,3 +496,55 @@ def test_cli_needs_an_output_dir(tmp_path, reads, monkeypatch, capsys):
 
     cli.main(["sample", *common, "--num-samples", "3", "--output-dir", str(tmp_path)])
     assert make_store(tmp_path).sample_path(CORPUS, 3).exists()
+
+
+def test_counts_at_a_revision(tmp_path, reads):
+    store = make_store(tmp_path)
+    store.counts(CORPUS, CharTokenizer(), [1], revision="r1")
+    assert {r["revision"] for r in reads} == {"r1"}
+    counts_dir = tmp_path / "someone--letters/default/train/all/char/counts/nobos"
+    assert (
+        json.loads((counts_dir / "1-grams.json").read_text())["dataset_revision"]
+        == "r1"
+    )
+    store.counts(CORPUS, CharTokenizer(), [1])  # the saved counts, of any revision
+    with pytest.raises(ValueError, match="r1"):
+        store.counts(CORPUS, CharTokenizer(), [1], revision="r2")
+
+
+def test_token_cache_of_another_revision_is_refused(tmp_path, reads):
+    store = make_store(tmp_path)
+    store.counts(CORPUS, CharTokenizer(), [1], cache="tokens", revision="r1")
+    with pytest.raises(ValueError, match="r1"):
+        store.counts(CORPUS, CharTokenizer(), [2], cache="tokens", revision="r2")
+
+
+def test_sample_of_another_revision_is_not_counted(tmp_path, reads):
+    store = make_store(tmp_path)
+    store.sample(CORPUS, 3, revision="r1")
+    store.counts(CORPUS, CharTokenizer(), [1], source="hash_n3", revision="r1")
+    with pytest.raises(ValueError, match="r1"):
+        store.counts(CORPUS, CharTokenizer(), [2], source="hash_n3", revision="r2")
+
+
+def test_cli_cache_and_revision_are_shared(tmp_path, reads, monkeypatch):
+    from corpus_tools import cli
+
+    monkeypatch.setattr(cli, "preset", lambda *args, **kwargs: CORPUS)
+    monkeypatch.setattr(cli, "hub_model_id", lambda name: name)
+    monkeypatch.setattr(store_module, "split_rows", lambda corpus, **_: len(TEXTS))
+    common = ["--corpus", "openwebtext", "--output-dir", str(tmp_path),
+              "--cache-dir", str(tmp_path / "cache"), "--cache", "corpus",
+              "--revision", "r5"]  # fmt: skip
+    cli.main(["sample", *common, "--num-samples", "3"])
+    assert reads[-1]["hf_cache_dir"] == tmp_path / "cache/hf"
+    assert reads[-1]["revision"] == "r5"
+
+    tokenizer = CharTokenizer()
+    monkeypatch.setattr(
+        "transformers.AutoTokenizer.from_pretrained", lambda name: tokenizer
+    )
+    reads.clear()
+    cli.main(["count", *common, "--tokenizer", "char", "--n", "1"])
+    assert reads[-1]["hf_cache_dir"] == tmp_path / "cache/hf"
+    assert {r["revision"] for r in reads} == {"r5"}

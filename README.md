@@ -16,7 +16,7 @@ corpus-tools = { git = "https://github.com/gokamoda/corpus-tools.git", rev = "<c
 
 ## 使い方
 
-結果（サンプルと頻度）の保存先は `--output-dir`（Python では `Store(output_dir)`）で、毎回指定する。作り直せるもの（HF の cache、tokenize 済みの列、数えている途中の頻度）は `--cache-dir`（`Store(..., cache_dir=)`）に置き、未指定なら `~/.cache/corpus-tools`。`--name` はデータセットの config で、wikipedia では版（`20231101.ja` など）を必ず指定する。openwebtext と tinystories では省略でき、既定の config（`plain_text`, `default`）を使う。
+結果（サンプルと頻度）の保存先は `--output-dir`（Python では `Store(output_dir)`）で、毎回指定する。作り直せるもの（HF の cache、tokenize 済みの列、数えている途中の頻度）は `--cache-dir`（`Store(..., cache_dir=)`）に置き、未指定なら `~/.cache/corpus-tools`。`--corpus`, `--name`, `--split`, `--revision`（データセットの commit）, `--cache` は sample と count で共通。`--name` はデータセットの config で、wikipedia では版（`20231101.ja` など）を必ず指定する。openwebtext と tinystories では省略でき、既定の config（`plain_text`, `default`）を使う。
 
 ### sample: hash サンプル
 

@@ -57,6 +57,7 @@ COUNT_RULES = (
     "with bos, the BOS token id is put before each document"
 )
 CacheMode = Literal["none", "corpus", "tokens"]
+SampleCacheMode = Literal["none", "corpus"]
 
 
 def _now() -> str:
@@ -171,23 +172,23 @@ class Store:
         num_samples: int,
         *,
         max_chars: int | None = None,
-        cache_corpus: bool = False,
+        cache: SampleCacheMode = "none",
         revision: str | None = None,
     ) -> Path:
         """Path of the hash sample, made first if it does not exist.
 
+        ``cache`` is how the corpus is read: "none" (streamed) or "corpus"
+        (through the Hugging Face cache under the cache directory).
         ``revision`` pins the dataset to a commit (default: the latest). A
         saved sample of another revision is refused, as it has the same path.
         """
+        if cache not in ("none", "corpus"):
+            raise ValueError(f"Unknown cache mode {cache!r} for a sample")
         path = self.sample_path(corpus, num_samples, max_chars)
         if path.exists():
             meta_path = path.with_suffix(".meta.json")
             saved = json.loads(meta_path.read_text()) if meta_path.exists() else {}
-            if revision is not None and saved.get("dataset_revision") != revision:
-                raise ValueError(
-                    f"{path} was made from revision {saved.get('dataset_revision')}, "
-                    f"not {revision}"
-                )
+            _check_revision(path, saved, revision)
             return path
         return make_sample(
             corpus,
@@ -195,7 +196,7 @@ class Store:
             path,
             revision=revision,
             max_chars=max_chars,
-            hf_cache_dir=self.hf_cache_dir if cache_corpus else None,
+            hf_cache_dir=self.hf_cache_dir if cache == "corpus" else None,
         )
 
     # counts
@@ -242,6 +243,7 @@ class Store:
         bos: bool = False,
         max_documents: int | None = None,
         tokenizer_name: str | None = None,
+        revision: str | None = None,
         cpus: int | None = None,
         num_workers: int | None = None,
         batch_size: int = 1000,
@@ -257,6 +259,10 @@ class Store:
         - "none": stream the corpus and count while reading;
         - "corpus": read it through the Hugging Face cache under the cache directory;
         - "tokens": tokenize it once into ``tokenized/`` and count from there.
+
+        ``revision`` pins the dataset to a commit (default: the latest, or
+        the one of the sample). Saved counts, a token cache or a sample of
+        another revision are refused, as they have the same paths.
 
         The corpus is read in shards (see ``_num_shards``). ``cpus`` is how
         many threads may run at once, in all; they are given to processes
@@ -318,10 +324,11 @@ class Store:
                     f"{saved['vocab_size']}, but the tokenizer has {vocab_size}; "
                     "give another tokenizer_name"
                 )
+            _check_revision(counts_dir / counts_filename(n), saved, revision)
         if missing:
             meta: dict[str, Any] = {
                 **_corpus_meta(corpus),
-                **self._source_meta(corpus, source),
+                **self._source_meta(corpus, source, revision),
                 "max_documents": max_documents,
                 "tokenizer": tokenizer.name_or_path,
                 "tokenizer_name": tokenizer_name,
@@ -342,7 +349,9 @@ class Store:
             tokenized_dir = None
             if cache == "tokens":
                 tokenized_dir = tokenizer_cache_dir / "tokenized"
-                texts, num_shards = _prepare_tokenized(tokenized_dir, texts, meta)
+                texts, num_shards = _prepare_tokenized(
+                    tokenized_dir, texts, meta, revision
+                )
                 # the counts are of the data that was tokenized, not of today's
                 meta["dataset_revision"] = texts.revision
             else:
@@ -409,16 +418,29 @@ class Store:
             shutil.rmtree(shards_dir)
         return {n: load_counts(counts_dir / counts_filename(n)) for n in ns}
 
-    def _source_meta(self, corpus: Corpus, source: str) -> dict[str, Any]:
+    def _source_meta(
+        self, corpus: Corpus, source: str, revision: str | None
+    ) -> dict[str, Any]:
         if source == ALL:
-            revision = dataset_revision(corpus)
+            revision = revision or dataset_revision(corpus)
             return {"source": ALL, "dataset_revision": revision}
-        meta_path = self.corpus_dir(corpus) / "samples" / f"{source}.meta.json"
+        sample_path = self.corpus_dir(corpus) / "samples" / f"{source}.jsonl"
+        meta_path = sample_path.with_suffix(".meta.json")
         sample_meta = json.loads(meta_path.read_text()) if meta_path.exists() else {}
+        _check_revision(sample_path, sample_meta, revision)
         return {
             "source": source,
             "dataset_revision": sample_meta.get("dataset_revision"),
         }
+
+
+def _check_revision(path: Path, meta: dict[str, Any], revision: str | None) -> None:
+    """Refuse what was made from another revision than the one asked for."""
+    if revision is not None and meta.get("dataset_revision") != revision:
+        raise ValueError(
+            f"{path} was made from revision {meta.get('dataset_revision')}, "
+            f"not {revision}"
+        )
 
 
 # reading in shards
@@ -524,7 +546,7 @@ def _open_shard(
 
 
 def _prepare_tokenized(
-    tokenized_dir: Path, texts: _Texts, meta: dict[str, Any]
+    tokenized_dir: Path, texts: _Texts, meta: dict[str, Any], revision: str | None
 ) -> tuple[_Texts, int]:
     """The texts and number of shards of the token cache, started if new.
 
@@ -541,6 +563,7 @@ def _prepare_tokenized(
         saved = json.loads(meta_path.read_text())
         if saved["vocab_size"] != meta["vocab_size"]:
             raise ValueError(f"{tokenized_dir} has another vocabulary size")
+        _check_revision(tokenized_dir, saved, revision)
         texts = replace(texts, revision=saved.get("dataset_revision"))
         return texts, saved["num_shards"]
     num_shards = _num_shards(texts)

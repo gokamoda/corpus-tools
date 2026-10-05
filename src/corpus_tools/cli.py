@@ -34,6 +34,27 @@ def _add_common_args(parser: argparse.ArgumentParser) -> None:
         help="Dataset config; required for wikipedia (e.g. 20231101.ja).",
     )
     parser.add_argument("--split", default="train")
+    parser.add_argument(
+        "--revision",
+        default=None,
+        help="Commit of the dataset's Hub repository to read (default: the "
+        "latest). Saved results of another commit are refused.",
+    )
+
+
+def _add_cache_arg(parser: argparse.ArgumentParser, *, tokens: bool) -> None:
+    help_text = (
+        "none: stream the corpus. corpus: read it through the Hugging Face cache "
+        "under the cache directory."
+    )
+    if tokens:
+        help_text += " tokens: save the token ids once and count from them."
+    parser.add_argument(
+        "--cache",
+        choices=["none", "corpus", "tokens"] if tokens else ["none", "corpus"],
+        default="none",
+        help=help_text,
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -56,23 +77,13 @@ def build_parser() -> argparse.ArgumentParser:
         "(the hash is of the full text).",
     )
     sample.add_argument(
-        "--revision",
-        default=None,
-        help="Commit of the dataset's Hub repository to read (default: the latest).",
-    )
-    sample.add_argument(
         "--output",
         type=Path,
         default=None,
         help="File to save the sample to (overwritten), instead of the "
         "output directory.",
     )
-    sample.add_argument(
-        "--cache-corpus",
-        action="store_true",
-        help="Read the corpus through the Hugging Face cache under the cache directory "
-        "instead of streaming it.",
-    )
+    _add_cache_arg(sample, tokens=False)
 
     count = commands.add_parser(
         "count",
@@ -88,13 +99,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=ALL,
         help=f"{ALL} (the whole split) or a saved sample, e.g. hash_n10000.",
     )
-    count.add_argument(
-        "--cache",
-        choices=["none", "corpus", "tokens"],
-        default="none",
-        help="none: stream and count. corpus: read through the Hugging Face "
-        "cache. tokens: save the token ids once and count from them.",
-    )
+    _add_cache_arg(count, tokens=True)
     count.add_argument(
         "--bos", action="store_true", help="Put the BOS token before each document."
     )
@@ -142,7 +147,7 @@ def main(argv: list[str] | None = None) -> None:
             args.output,
             revision=args.revision,
             max_chars=args.max_chars,
-            hf_cache_dir=hf_cache_dir if args.cache_corpus else None,
+            hf_cache_dir=hf_cache_dir if args.cache == "corpus" else None,
         )
         print(f"sample: {path}")
         return
@@ -154,7 +159,7 @@ def main(argv: list[str] | None = None) -> None:
             corpus,
             args.num_samples,
             max_chars=args.max_chars,
-            cache_corpus=args.cache_corpus,
+            cache=args.cache,
             revision=args.revision,
         )
         print(f"sample: {path}")
@@ -170,6 +175,7 @@ def main(argv: list[str] | None = None) -> None:
         bos=args.bos,
         max_documents=args.max_documents,
         tokenizer_name=tokenizer_name,
+        revision=args.revision,
         cpus=args.cpus,
         num_workers=args.num_workers,
     )
