@@ -1,15 +1,20 @@
 """Where samples, tokenized corpora and counts are saved, and making them on demand.
 
-Layout under the cache directory (``Store(cache_dir)``, default
+Results go under the output directory (``Store(output_dir)``, always given),
+and what can be made again under the cache directory (``cache_dir``, default
 ~/.cache/corpus-tools):
 
-    hf/                                     Hugging Face cache (cache="corpus")
-    <dataset>/<name>/<split>/               e.g. Skylion007--openwebtext/plain_text/train
-        samples/hash_n10000.jsonl           hash sample (+ .meta.json)
-        <source>/<tokenizer>/               source = all | hash_n10000 (| ..._head100)
+    <output_dir>/
+        <dataset>/<name>/<split>/           e.g. Skylion007--openwebtext/plain_text/train
+            samples/hash_n10000.jsonl       hash sample (+ .meta.json)
+            <source>/<tokenizer>/           source = all | hash_n10000 (| ..._head100)
+                counts/nobos/1-grams.npy, 2-grams.npz   counts (+ 1-grams.json, ...)
+                counts/bos/...              counts with BOS put before each document
+    <cache_dir>/
+        hf/                                 Hugging Face cache (cache="corpus")
+        <dataset>/<name>/<split>/<source>/<tokenizer>/
             tokenized/                      meta.json, shard-00000/ (tokens.bin, offsets.npy, meta.json), ...
-            counts/nobos/1-grams.npy, 2-grams.npz   counts (+ 1-grams.json, ...)
-            counts/bos/...                  counts with BOS put before each document
+            counts/nobos/shards/            counts of each shard, until they are added up
 
 A file that already exists is loaded instead of being made again. Files are
 written under a temporary name and renamed last, so a file (or shard
@@ -138,7 +143,10 @@ def make_sample(
 
 
 class Store:
-    def __init__(self, cache_dir: str | Path = DEFAULT_CACHE_DIR):
+    def __init__(
+        self, output_dir: str | Path, cache_dir: str | Path = DEFAULT_CACHE_DIR
+    ):
+        self.output_dir = Path(output_dir).expanduser()
         self.cache_dir = Path(cache_dir).expanduser()
 
     @property
@@ -146,7 +154,8 @@ class Store:
         return self.cache_dir / "hf"
 
     def corpus_dir(self, corpus: Corpus) -> Path:
-        return self.cache_dir / corpus.path
+        """Directory of the results of this corpus."""
+        return self.output_dir / corpus.path
 
     # samples
 
@@ -204,9 +213,23 @@ class Store:
         source: str = ALL,
         max_documents: int | None = None,
     ) -> Path:
+        """Directory of the counts of this tokenizer (``counts/`` in it)."""
         return self.source_dir(corpus, source, max_documents) / tokenizer_name.replace(
             "/", "--"
         )
+
+    def tokenizer_cache_dir(
+        self,
+        corpus: Corpus,
+        tokenizer_name: str,
+        source: str = ALL,
+        max_documents: int | None = None,
+    ) -> Path:
+        """Directory of the token cache and shard counts of this tokenizer."""
+        relative = self.tokenizer_dir(
+            corpus, tokenizer_name, source, max_documents
+        ).relative_to(self.output_dir)
+        return self.cache_dir / relative
 
     def counts(
         self,
@@ -241,8 +264,8 @@ class Store:
         tokenizer of each process (see ``_workers``). Without either, the
         shards are counted in this process, and the tokenizer uses its own
         number of threads. Each process holds the counts of its shard in
-        memory. The counts of each shard are saved under
-        ``counts/<bos>/shards/`` and removed once added up, so that a stopped
+        memory. The counts of each shard are saved in the cache directory
+        (``counts/<bos>/shards/``) and removed once added up, so that a stopped
         run is continued from the shards not yet counted.
 
         Results are saved under ``tokenizer_name`` (default: the canonical Hub
@@ -279,7 +302,11 @@ class Store:
         tokenizer_dir = self.tokenizer_dir(
             corpus, tokenizer_name, source, max_documents
         )
-        counts_dir = tokenizer_dir / "counts" / ("bos" if bos else "nobos")
+        bos_dir = "bos" if bos else "nobos"
+        counts_dir = tokenizer_dir / "counts" / bos_dir
+        tokenizer_cache_dir = self.tokenizer_cache_dir(
+            corpus, tokenizer_name, source, max_documents
+        )
         missing = [n for n in ns if not (counts_dir / counts_filename(n)).exists()]
         for n in set(ns) - set(missing):
             saved = json.loads(
@@ -314,13 +341,13 @@ class Store:
             )
             tokenized_dir = None
             if cache == "tokens":
-                tokenized_dir = tokenizer_dir / "tokenized"
+                tokenized_dir = tokenizer_cache_dir / "tokenized"
                 texts, num_shards = _prepare_tokenized(tokenized_dir, texts, meta)
                 # the counts are of the data that was tokenized, not of today's
                 meta["dataset_revision"] = texts.revision
             else:
                 num_shards = _num_shards(texts)
-            shards_dir = counts_dir / "shards"
+            shards_dir = tokenizer_cache_dir / "counts" / bos_dir / "shards"
             _prepare_shard_counts(
                 shards_dir,
                 {

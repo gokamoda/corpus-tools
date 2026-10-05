@@ -15,10 +15,17 @@ from corpus_tools.store import (
 
 def _add_common_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=None,
+        help="Directory to save results to (samples and counts); required.",
+    )
+    parser.add_argument(
         "--cache-dir",
         type=Path,
         default=DEFAULT_CACHE_DIR,
-        help="Directory to save to (default: %(default)s).",
+        help="Directory for what can be made again: the Hugging Face cache, "
+        "token caches, counts of shards while counting (default: %(default)s).",
     )
     parser.add_argument("--corpus", choices=sorted(PRESETS), required=True)
     parser.add_argument(
@@ -58,7 +65,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help="File to save the sample to (overwritten), instead of the "
-        "cache directory.",
+        "output directory.",
     )
     sample.add_argument(
         "--cache-corpus",
@@ -122,27 +129,34 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> None:
-    args = build_parser().parse_args(argv)
-    store = Store(args.cache_dir)
+    parser = build_parser()
+    args = parser.parse_args(argv)
     corpus = preset(args.corpus, split=args.split, name=args.name)
+    if args.command == "sample" and args.output is not None:
+        if args.output_dir is not None:
+            parser.error("give either --output or --output-dir")
+        hf_cache_dir = Path(args.cache_dir).expanduser() / "hf"
+        path = make_sample(
+            corpus,
+            args.num_samples,
+            args.output,
+            revision=args.revision,
+            max_chars=args.max_chars,
+            hf_cache_dir=hf_cache_dir if args.cache_corpus else None,
+        )
+        print(f"sample: {path}")
+        return
+    if args.output_dir is None:
+        parser.error("--output-dir is required")
+    store = Store(args.output_dir, cache_dir=args.cache_dir)
     if args.command == "sample":
-        if args.output is None:
-            path = store.sample(
-                corpus,
-                args.num_samples,
-                max_chars=args.max_chars,
-                cache_corpus=args.cache_corpus,
-                revision=args.revision,
-            )
-        else:
-            path = make_sample(
-                corpus,
-                args.num_samples,
-                args.output,
-                revision=args.revision,
-                max_chars=args.max_chars,
-                hf_cache_dir=store.hf_cache_dir if args.cache_corpus else None,
-            )
+        path = store.sample(
+            corpus,
+            args.num_samples,
+            max_chars=args.max_chars,
+            cache_corpus=args.cache_corpus,
+            revision=args.revision,
+        )
         print(f"sample: {path}")
         return
 

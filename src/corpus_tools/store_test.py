@@ -25,7 +25,11 @@ def contiguous_part(items, num_shards, index):
 
 
 def tokenized_dir_of(tmp_path):
-    return tmp_path / "someone--letters/default/train/all/char/tokenized"
+    return tmp_path / "cache/someone--letters/default/train/all/char/tokenized"
+
+
+def make_store(tmp_path):
+    return Store(tmp_path, cache_dir=tmp_path / "cache")
 
 
 @pytest.fixture
@@ -65,13 +69,25 @@ def assert_same(counts, expected_counts):
             assert (value != expected_counts[n]).nnz == 0
 
 
-def test_cache_dir():
-    assert Store().cache_dir == Path.home() / ".cache/corpus-tools"
-    assert Store("~/elsewhere").cache_dir == Path.home() / "elsewhere"
+def test_directories():
+    store = Store("~/results")
+    assert store.output_dir == Path.home() / "results"
+    assert store.cache_dir == Path.home() / ".cache/corpus-tools"
+    assert Store("out", cache_dir="~/elsewhere").cache_dir == Path.home() / "elsewhere"
+
+
+def test_results_and_caches_are_apart(tmp_path, reads):
+    store = make_store(tmp_path)
+    store.counts(CORPUS, CharTokenizer(), [1], cache="tokens")
+    relative = Path("someone--letters/default/train/all/char")
+    assert (tmp_path / relative / "counts/nobos/1-grams.npy").exists()
+    assert (tmp_path / "cache" / relative / "tokenized/meta.json").exists()
+    assert not (tmp_path / relative / "tokenized").exists()
+    assert not (tmp_path / "cache" / relative / "counts/nobos/1-grams.npy").exists()
 
 
 def test_sample_is_made_once(tmp_path, reads):
-    store = Store(tmp_path)
+    store = make_store(tmp_path)
     path = store.sample(CORPUS, 3)
     assert path == tmp_path / "someone--letters/default/train/samples/hash_n3.jsonl"
     rows = [json.loads(line) for line in path.open()]
@@ -88,7 +104,7 @@ def test_sample_is_made_once(tmp_path, reads):
 @pytest.mark.parametrize("cache", ["none", "corpus", "tokens"])
 @pytest.mark.parametrize("bos", [False, True])
 def test_counts_are_the_same_for_every_cache(tmp_path, reads, cache, bos):
-    store = Store(tmp_path)
+    store = make_store(tmp_path)
     counts = store.counts(CORPUS, CharTokenizer(), [2, 1, 3], cache=cache, bos=bos)
     assert_same(counts, expected([1, 2, 3], bos_id=25 if bos else None))
     assert reads[0]["revision"] == "abc123"
@@ -114,7 +130,7 @@ def test_counts_are_the_same_for_every_cache(tmp_path, reads, cache, bos):
 
 
 def test_token_cache_is_shared_by_bos_and_new_n(tmp_path, reads):
-    store = Store(tmp_path)
+    store = make_store(tmp_path)
     store.counts(CORPUS, CharTokenizer(), [1], cache="tokens")
     counts = store.counts(CORPUS, CharTokenizer(), [2], cache="tokens", bos=True)
     assert_same(counts, expected([2], bos_id=25))
@@ -129,7 +145,7 @@ def test_token_cache_is_shared_by_bos_and_new_n(tmp_path, reads):
 
 
 def test_counts_of_a_sample(tmp_path, reads):
-    store = Store(tmp_path)
+    store = make_store(tmp_path)
     store.sample(CORPUS, 4)
     counts = store.counts(CORPUS, CharTokenizer(), [1, 2], source="hash_n4")
     sample = hash_sample([{"text": t} for t in TEXTS], num_samples=4)
@@ -146,7 +162,7 @@ def test_counts_of_a_sample(tmp_path, reads):
 
 
 def test_max_documents_is_saved_separately(tmp_path, reads):
-    store = Store(tmp_path)
+    store = make_store(tmp_path)
     counts = store.counts(CORPUS, CharTokenizer(), [1], max_documents=3)
     assert_same(counts, expected([1], texts=TEXTS[:3]))
     assert (tmp_path / "someone--letters/default/train/all_head3/char").is_dir()
@@ -154,18 +170,18 @@ def test_max_documents_is_saved_separately(tmp_path, reads):
 
 def test_missing_sample(tmp_path, reads):
     with pytest.raises(FileNotFoundError):
-        Store(tmp_path).counts(CORPUS, CharTokenizer(), [1], source="hash_n4")
+        make_store(tmp_path).counts(CORPUS, CharTokenizer(), [1], source="hash_n4")
 
 
 def test_bos_needs_a_bos_token(tmp_path, reads):
     tokenizer = CharTokenizer()
     tokenizer.bos_token_id = None
     with pytest.raises(ValueError):
-        Store(tmp_path).counts(CORPUS, tokenizer, [1], bos=True)
+        make_store(tmp_path).counts(CORPUS, tokenizer, [1], bos=True)
 
 
 def test_tokenizer_name_sets_the_directory(tmp_path, reads):
-    store = Store(tmp_path)
+    store = make_store(tmp_path)
     store.counts(CORPUS, CharTokenizer(), [1], tokenizer_name="org/char-v2")
     corpus_dir = tmp_path / "someone--letters/default/train/all"
     assert (corpus_dir / "org--char-v2/counts/nobos/1-grams.npy").exists()
@@ -178,7 +194,7 @@ def test_tokenizer_name_sets_the_directory(tmp_path, reads):
 
 
 def test_saved_counts_of_another_vocabulary_are_refused(tmp_path, reads):
-    store = Store(tmp_path)
+    store = make_store(tmp_path)
     store.counts(CORPUS, CharTokenizer(), [1])
 
     class LargerTokenizer(CharTokenizer):
@@ -208,7 +224,7 @@ def test_make_sample_to_a_given_file_at_a_revision(tmp_path, reads):
 
 
 def test_sample_of_another_revision_is_refused(tmp_path, reads):
-    store = Store(tmp_path)
+    store = make_store(tmp_path)
     store.sample(CORPUS, 3, revision="r1")
     assert store.sample(CORPUS, 3, revision="r1") == store.sample_path(CORPUS, 3)
     with pytest.raises(ValueError, match="r1"):
@@ -230,10 +246,10 @@ def test_cli_sample_with_output_and_revision(tmp_path, reads, monkeypatch):
 
 
 def test_interrupted_token_cache_is_completed(tmp_path, reads):
-    store = Store(tmp_path)
+    store = make_store(tmp_path)
     store.counts(CORPUS, CharTokenizer(), [1], cache="tokens")
     tokenized_dir = tokenized_dir_of(tmp_path)
-    counts_dir = tokenized_dir.parent / "counts/nobos"
+    counts_dir = tmp_path / "someone--letters/default/train/all/char/counts/nobos"
     # as if stopped while writing shard 1, before the counts were saved
     shard = tokenized_dir / shard_name(1)
     shard.rename(shard.with_name(shard.name + ".tmp"))
@@ -247,7 +263,7 @@ def test_interrupted_token_cache_is_completed(tmp_path, reads):
 
 
 def test_counts_without_their_file_are_made_again(tmp_path, reads):
-    store = Store(tmp_path)
+    store = make_store(tmp_path)
     counts_dir = tmp_path / "someone--letters/default/train/all/char/counts/nobos"
     counts_dir.mkdir(parents=True)
     # as if stopped after the meta was written, before the counts
@@ -261,11 +277,11 @@ def test_token_cache_of_the_older_format_is_refused(tmp_path, reads):
     tokenized_dir.mkdir(parents=True)
     (tokenized_dir / "tokens.bin").write_bytes(b"")
     with pytest.raises(ValueError, match="older format"):
-        Store(tmp_path).counts(CORPUS, CharTokenizer(), [1], cache="tokens")
+        make_store(tmp_path).counts(CORPUS, CharTokenizer(), [1], cache="tokens")
 
 
 def test_sample_without_its_file_is_made_again(tmp_path, reads):
-    store = Store(tmp_path)
+    store = make_store(tmp_path)
     path = store.sample_path(CORPUS, 3)
     path.parent.mkdir(parents=True)
     # as if stopped after the meta was written, before the sample was renamed
@@ -280,7 +296,7 @@ def test_sample_without_its_file_is_made_again(tmp_path, reads):
 
 def test_sample_is_read_in_shards(tmp_path, reads, monkeypatch):
     monkeypatch.setattr(store_module, "SAMPLE_SHARD_SIZE", 3)
-    store = Store(tmp_path)
+    store = make_store(tmp_path)
     store.sample(CORPUS, 8)
     counts = store.counts(
         CORPUS, CharTokenizer(), [1, 2], source="hash_n8", cache="tokens"
@@ -288,7 +304,7 @@ def test_sample_is_read_in_shards(tmp_path, reads, monkeypatch):
     sample = hash_sample([{"text": t} for t in TEXTS], num_samples=8)
     assert_same(counts, expected([1, 2], texts=[row["text"] for row in sample]))
     tokenized = TokenizedCorpus(
-        tmp_path / "someone--letters/default/train/hash_n8/char/tokenized"
+        tmp_path / "cache/someone--letters/default/train/hash_n8/char/tokenized"
     )
     assert [len(shard) for shard in tokenized.shards] == [3, 3, 1]  # 7 distinct
 
@@ -314,7 +330,7 @@ def parquet_corpus(tmp_path, monkeypatch):
 @pytest.mark.parametrize("cache", ["none", "corpus", "tokens"])
 def test_counts_in_processes(tmp_path, parquet_corpus, cache, monkeypatch):
     monkeypatch.setattr(store_module, "CACHED_SHARD_SIZE", 15)  # 3 shards
-    store = Store(tmp_path / "cache")
+    store = Store(tmp_path / "out", cache_dir=tmp_path / "cache")
     counts = store.counts(
         parquet_corpus,
         CharTokenizer(),
@@ -329,7 +345,8 @@ def test_counts_in_processes(tmp_path, parquet_corpus, cache, monkeypatch):
     assert meta["num_documents"] == len(TEXTS)
     assert meta["num_tokens"] == sum(len(t) for t in TEXTS)
     if cache == "tokens":
-        assert TokenizedCorpus(tokenizer_dir / "tokenized").meta["num_shards"] == 3
+        tokenized_dir = store.tokenizer_cache_dir(parquet_corpus, "char") / "tokenized"
+        assert TokenizedCorpus(tokenized_dir).meta["num_shards"] == 3
 
 
 def test_stopped_count_continues_from_its_shard_counts(tmp_path, reads, monkeypatch):
@@ -341,11 +358,11 @@ def test_stopped_count_continues_from_its_shard_counts(tmp_path, reads, monkeypa
         return count_shard(task, tokenizer, position)
 
     monkeypatch.setattr(store_module, "_count_shard", fail_on_the_last_shard)
-    store = Store(tmp_path)
+    store = make_store(tmp_path)
     with pytest.raises(KeyboardInterrupt):
         store.counts(CORPUS, CharTokenizer(), [1, 2])
     shards_dir = (
-        tmp_path / "someone--letters/default/train/all/char/counts/nobos/shards"
+        tmp_path / "cache/someone--letters/default/train/all/char/counts/nobos/shards"
     )
     assert sorted(p.name for p in shards_dir.iterdir()) == [
         "plan.json", "shard-00000", "shard-00001",
@@ -367,7 +384,7 @@ def test_shard_counts_of_another_plan_are_not_used(tmp_path, reads, monkeypatch)
         return count_shard(task, tokenizer, position)
 
     monkeypatch.setattr(store_module, "_count_shard", fail_on_the_last_shard)
-    store = Store(tmp_path)
+    store = make_store(tmp_path)
     with pytest.raises(KeyboardInterrupt):
         store.counts(CORPUS, CharTokenizer(), [1, 2])
     monkeypatch.setattr(store_module, "_count_shard", count_shard)
@@ -379,7 +396,9 @@ def test_shard_counts_of_another_plan_are_not_used(tmp_path, reads, monkeypatch)
 
 def test_cached_split_is_read_in_shards_of_a_fixed_size(tmp_path, reads, monkeypatch):
     monkeypatch.setattr(store_module, "CACHED_SHARD_SIZE", 15)
-    counts = Store(tmp_path).counts(CORPUS, CharTokenizer(), [1, 2], cache="corpus")
+    counts = make_store(tmp_path).counts(
+        CORPUS, CharTokenizer(), [1, 2], cache="corpus"
+    )
     assert_same(counts, expected([1, 2]))
     assert sorted(r["shard"] for r in reads) == [(3, 0), (3, 1), (3, 2)]  # 40 / 15
 
@@ -392,10 +411,12 @@ def test_error_in_a_worker(tmp_path, parquet_corpus):
 
     bad = sorted(data.iterdir())[1]
     pq.write_table(pa.table({"text": ["abc", "ABC"]}), bad)
-    store = Store(tmp_path / "cache")
+    store = Store(tmp_path / "out", cache_dir=tmp_path / "cache")
     with pytest.raises(ValueError):
         store.counts(parquet_corpus, CharTokenizer(), [1], num_workers=2)
-    shards_dir = store.tokenizer_dir(parquet_corpus, "char") / "counts/nobos/shards"
+    shards_dir = (
+        store.tokenizer_cache_dir(parquet_corpus, "char") / "counts/nobos/shards"
+    )
     # the shard counted next to the bad one was finished and kept
     assert (shards_dir / shard_name(0)).is_dir()
     assert not (shards_dir / shard_name(1)).exists()
@@ -411,7 +432,7 @@ def test_script_without_main_guard_ends_with_an_error(tmp_path, parquet_corpus):
         "from corpus_tools.corpus import Corpus\n"
         "from corpus_tools.tokenize_test import CharTokenizer\n"
         f"corpus = Corpus({parquet_corpus.dataset!r}, 'default')\n"
-        f"Store({str(tmp_path / 'cache')!r}).counts(\n"
+        f"Store({str(tmp_path / 'out')!r}, cache_dir={str(tmp_path / 'cache')!r}).counts(\n"
         "    corpus, CharTokenizer(), [1], num_workers=2, tokenizer_name='char'\n"
         ")\n"
     )
@@ -456,3 +477,22 @@ def test_worker_sets_the_tokenizer_threads(monkeypatch):
     store_module._init_worker("tokenizer", 4, positions, lock)
     assert store_module.os.environ["RAYON_NUM_THREADS"] == "4"
     assert store_module._worker == {"tokenizer": "tokenizer", "position": 3}
+
+
+def test_cli_needs_an_output_dir(tmp_path, reads, monkeypatch, capsys):
+    from corpus_tools import cli
+
+    monkeypatch.setattr(cli, "preset", lambda *args, **kwargs: CORPUS)
+    common = ["--corpus", "openwebtext", "--cache-dir", str(tmp_path / "cache")]
+    with pytest.raises(SystemExit):
+        cli.main(["count", *common, "--tokenizer", "char"])
+    assert "--output-dir is required" in capsys.readouterr().err
+    with pytest.raises(SystemExit):
+        cli.main(
+            ["sample", *common, "--num-samples", "3", "--output", str(tmp_path / "s.jsonl"),
+             "--output-dir", str(tmp_path)]
+        )  # fmt: skip
+    assert "either --output or --output-dir" in capsys.readouterr().err
+
+    cli.main(["sample", *common, "--num-samples", "3", "--output-dir", str(tmp_path)])
+    assert make_store(tmp_path).sample_path(CORPUS, 3).exists()

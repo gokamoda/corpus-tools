@@ -16,11 +16,11 @@ def test_tinystories_with_gpt2(tmp_path):
 
     tokenizer = cast(Any, AutoTokenizer.from_pretrained("gpt2"))
     corpus = preset("tinystories", split="validation")
-    store = Store(tmp_path)
+    store = Store(tmp_path, cache_dir=tmp_path / "cache")
     sample = load_hash_sample(store.sample(corpus, 50))
 
     by_cache = {
-        cache: Store(tmp_path / cache).counts(
+        cache: Store(tmp_path / cache, cache_dir=tmp_path / cache / "cache").counts(
             corpus, tokenizer, [1, 2], cache=cache, max_documents=300
         )
         for cache in ("none", "tokens")
