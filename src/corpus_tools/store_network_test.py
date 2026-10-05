@@ -48,3 +48,23 @@ def test_hub_model_id():
         hub_model_id("no-such-user/no-such-model-xyz")
         == "no-such-user/no-such-model-xyz"
     )
+
+
+def test_run_and_exit_ends_a_process_that_left_a_stream():
+    # Without run_and_exit, this process does not exit (see run_and_exit).
+    import subprocess
+    import sys
+
+    code = (
+        "import itertools, time\n"
+        "from corpus_tools import preset\n"
+        "from corpus_tools.corpus import open_rows, run_and_exit\n"
+        "def main():\n"
+        "    with open_rows(preset('openwebtext')) as (rows, _):\n"
+        "        for i, _ in enumerate(itertools.islice(rows, 50)):\n"
+        "            if i == 10:\n"
+        "                time.sleep(5)\n"
+        "run_and_exit(main)\n"
+    )
+    result = subprocess.run([sys.executable, "-c", code], timeout=120, check=False)
+    assert result.returncode == 0

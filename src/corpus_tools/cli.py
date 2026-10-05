@@ -3,7 +3,7 @@
 import argparse
 from pathlib import Path
 
-from corpus_tools.corpus import PRESETS, preset
+from corpus_tools.corpus import PRESETS, preset, run_and_exit
 from corpus_tools.store import ALL, DEFAULT_CACHE_DIR, Store, hub_model_id
 
 
@@ -129,5 +129,10 @@ def main(argv: list[str] | None = None) -> None:
         print(f"n={n}: {total:,} n-grams, {distinct:,} distinct ({counts_dir})")
 
 
+def entry() -> None:
+    """The console script: main, ended by run_and_exit (see there for why)."""
+    run_and_exit(main)
+
+
 if __name__ == "__main__":
-    main()
+    entry()

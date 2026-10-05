@@ -20,7 +20,7 @@ count = [
 ]
 
 [project.scripts]
-corpus-tools = "corpus_tools.cli:main"
+corpus-tools = "corpus_tools.cli:entry"
 
 [tool.uv]
 dev-dependencies = [

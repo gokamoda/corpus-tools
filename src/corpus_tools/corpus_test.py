@@ -1,3 +1,5 @@
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -21,3 +23,34 @@ def test_wikipedia_needs_a_name():
 def test_unknown_preset():
     with pytest.raises(ValueError):
         preset("wikitext")
+
+
+@pytest.mark.parametrize(
+    ("body", "status", "stderr"),
+    [
+        ("print('done')", 0, ""),
+        ("sys.exit(3)", 3, ""),
+        ("sys.exit('bad usage')", 1, "bad usage"),
+        ("raise ValueError('boom')", 1, "ValueError: boom"),
+        ("raise KeyboardInterrupt", 130, ""),
+    ],
+)
+def test_run_and_exit(body, status, stderr):
+    code = (
+        "import sys\n"
+        "from corpus_tools.corpus import run_and_exit\n"
+        "def main():\n"
+        f"    {body}\n"
+        "run_and_exit(main)\n"
+        "print('not reached')\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert result.returncode == status
+    assert stderr in result.stderr
+    assert "not reached" not in result.stdout

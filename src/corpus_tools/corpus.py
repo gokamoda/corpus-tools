@@ -5,11 +5,15 @@ streaming (nothing is stored) or from the Hugging Face cache (the dataset is
 downloaded once, and later reads skip the download).
 """
 
-from collections.abc import Iterator
+import logging
+import os
+import sys
+import traceback
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 
 @dataclass(frozen=True)
@@ -87,3 +91,38 @@ def dataset_revision(corpus: Corpus) -> str | None:
         return HfApi().dataset_info(corpus.dataset).sha
     except Exception:  # offline, or the Hub is down
         return None
+
+
+def run_and_exit(main: Callable[[], object]) -> NoReturn:
+    """Run a command, then end the process without finalizing Python.
+
+    A process that leaves a streamed dataset before its end (--max-documents,
+    an error, Ctrl-C) may never exit: at exit, pyarrow's thread pool waits
+    forever for the Parquet reader behind the stream (apache/arrow#45214,
+    huggingface/datasets#7467 and #7879). It still happens with datasets
+    5.0.1 and pyarrow 25.0.1 when reading pauses for some seconds, as it does
+    while tokenizing. Closing the iterator or gc.collect() does not help.
+
+    So commands that stream use this as their entry point: the exit status is
+    0, the code of SystemExit, 130 for Ctrl-C, or 1 for an exception (whose
+    traceback is printed), and output is flushed before os._exit. Files must
+    be closed by the command itself, since atexit hooks do not run.
+    """
+    try:
+        main()
+        status = 0
+    except SystemExit as error:
+        if error.code is None or isinstance(error.code, int):
+            status = error.code or 0
+        else:
+            print(error.code, file=sys.stderr)
+            status = 1
+    except KeyboardInterrupt:
+        status = 130
+    except BaseException:
+        traceback.print_exc()
+        status = 1
+    logging.shutdown()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(status)
