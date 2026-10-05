@@ -334,6 +334,7 @@ dependencies = [
 [package.optional-dependencies]
 count = [
     { name = "scipy" },
+    { name = "tokenizer-tools" },
     { name = "transformers" },
 ]
 
@@ -349,8 +350,9 @@ requires-dist = [
     { name = "datasets", specifier = ">=3.2.0" },
     { name = "numpy", specifier = ">=2.0" },
     { name = "scipy", marker = "extra == 'count'", specifier = ">=1.14.1" },
+    { name = "tokenizer-tools", marker = "extra == 'count'", git = "https://github.com/gokamoda/tokenizer-tools.git?rev=6ad2efe" },
     { name = "tqdm", specifier = ">=4.67.1" },
-    { name = "transformers", marker = "extra == 'count'", specifier = ">=4.57.0" },
+    { name = "transformers", marker = "extra == 'count'", specifier = ">=5.0" },
 ]
 provides-extras = ["count"]
 
@@ -1433,6 +1435,14 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/94/e7/b2c673351809dca68a0e064b6af791aa332cf192da575fd474ed7d6f16a2/six-1.17.0.tar.gz", hash = "sha256:ff70335d468e7eb6ec65b95b99d3a2836546063f63acc5171de367e834932a81", size = 34031 }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/b7/ce/149a00dd41f10bc29e5921b496af8b574d8413afcd5e30dfa0ed46c2cc5e/six-1.17.0-py2.py3-none-any.whl", hash = "sha256:4721f391ed90541fddacab5acf947aa0d3dc7d27b2e1e8eda2be8970586c3274", size = 11050 },
+]
+
+[[package]]
+name = "tokenizer-tools"
+version = "0.1.0"
+source = { git = "https://github.com/gokamoda/tokenizer-tools.git?rev=6ad2efe#6ad2efef023aeebfde4a47c7cbda35ee80afaa67" }
+dependencies = [
+    { name = "transformers" },
 ]
 
 [[package]]

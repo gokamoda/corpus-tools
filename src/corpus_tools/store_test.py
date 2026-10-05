@@ -544,9 +544,7 @@ def test_cli_cache_and_revision_are_shared(tmp_path, reads, monkeypatch):
     assert reads[-1]["revision"] == "r5"
 
     tokenizer = CharTokenizer()
-    monkeypatch.setattr(
-        "transformers.AutoTokenizer.from_pretrained", lambda name: tokenizer
-    )
+    monkeypatch.setattr("tokenizer_tools.load_tokenizer", lambda name: tokenizer)
     reads.clear()
     cli.main(["count", *common, "--tokenizer", "char", "--n", "1"])
     assert reads[-1]["hf_cache_dir"] == tmp_path / "cache/hf"

@@ -36,7 +36,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from importlib.metadata import version
 from pathlib import Path
-from typing import Any, Literal, cast
+from typing import Any, Literal
 
 import numpy as np
 from tqdm import tqdm
@@ -54,7 +54,8 @@ from corpus_tools.tokenize import shard_name
 DEFAULT_CACHE_DIR = "~/.cache/corpus-tools"
 ALL = "all"
 COUNT_RULES = (
-    "texts tokenized as they are with add_special_tokens=False; "
+    "texts tokenized as they are with add_special_tokens=False, by "
+    "tokenizer-tools' load_tokenizer (which lowercases for do_lower_case); "
     "n-grams counted within each document; "
     "with bos, the BOS token id is put before each document"
 )
@@ -295,9 +296,9 @@ class Store:
         if num_workers is not None and num_workers < 1:
             raise ValueError("num_workers must be at least 1")
         if isinstance(tokenizer, str):
-            from transformers import AutoTokenizer
+            from tokenizer_tools import load_tokenizer
 
-            tokenizer = cast(Any, AutoTokenizer.from_pretrained(tokenizer))
+            tokenizer = load_tokenizer(tokenizer)
         tokenizer_name = tokenizer_name or hub_model_id(tokenizer.name_or_path)
         vocab_size = len(tokenizer)
         bos_id = None

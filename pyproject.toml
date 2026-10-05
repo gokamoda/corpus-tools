@@ -15,9 +15,13 @@ dependencies = [
 
 [project.optional-dependencies]
 count = [
-    "transformers>=4.57.0",
+    "transformers>=5.0",
+    "tokenizer-tools",
     "scipy>=1.14.1",
 ]
+
+[tool.uv.sources]
+tokenizer-tools = { git = "https://github.com/gokamoda/tokenizer-tools.git", rev = "6ad2efe" }
 
 [project.scripts]
 corpus-tools = "corpus_tools.cli:entry"
