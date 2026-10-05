@@ -80,4 +80,8 @@ def test_save_and_load(tmp_path):
             assert (loaded == value).all()
         else:
             assert (loaded != value).nnz == 0
-    assert sorted(p.name for p in tmp_path.iterdir()) == ["n1.npy", "n2.npz", "n3.npz"]
+    assert sorted(p.name for p in tmp_path.iterdir()) == [
+        "1-grams.npy",
+        "2-grams.npz",
+        "3-grams.npz",
+    ]

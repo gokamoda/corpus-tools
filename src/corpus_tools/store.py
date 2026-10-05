@@ -8,7 +8,7 @@ Layout under the cache directory (``Store(cache_dir)``, default
         samples/hash_n10000.jsonl           hash sample (+ .meta.json)
         <source>/<tokenizer>/               source = all | hash_n10000 (| ..._head100)
             tokenized/                      tokens.bin, offsets.npy, meta.json
-            counts/nobos/n1.npy, n2.npz     counts (+ n1.json, n2.json)
+            counts/nobos/1-grams.npy, 2-grams.npz   counts (+ 1-grams.json, ...)
             counts/bos/...                  counts with BOS put before each document
 
 A file that already exists is loaded instead of being made again.
@@ -210,7 +210,9 @@ class Store:
         counts_dir = tokenizer_dir / "counts" / ("bos" if bos else "nobos")
         missing = [n for n in ns if not (counts_dir / counts_filename(n)).exists()]
         for n in set(ns) - set(missing):
-            saved = json.loads((counts_dir / f"n{n}.json").read_text())
+            saved = json.loads(
+                (counts_dir / counts_filename(n)).with_suffix(".json").read_text()
+            )
             if saved["vocab_size"] != vocab_size:
                 raise ValueError(
                     f"{counts_dir} was counted with a vocabulary of "

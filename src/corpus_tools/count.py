@@ -130,7 +130,7 @@ def ngram_table(
 
 
 def counts_filename(n: int) -> str:
-    return "n1.npy" if n == 1 else f"n{n}.npz"
+    return f"{n}-grams.npy" if n == 1 else f"{n}-grams.npz"
 
 
 def save_counts(counts: Counts, path: Path) -> None:

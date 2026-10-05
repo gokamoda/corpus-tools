@@ -78,9 +78,9 @@ def test_counts_are_the_same_for_every_cache(tmp_path, reads, cache, bos):
     counts_dir = tmp_path / "someone--letters/default/train/all/char/counts"
     counts_dir = counts_dir / ("bos" if bos else "nobos")
     assert sorted(p.name for p in counts_dir.iterdir()) == [
-        "n1.json", "n1.npy", "n2.json", "n2.npz", "n3.json", "n3.npz",
+        "1-grams.json", "1-grams.npy", "2-grams.json", "2-grams.npz", "3-grams.json", "3-grams.npz",
     ]  # fmt: skip
-    meta = json.loads((counts_dir / "n1.json").read_text())
+    meta = json.loads((counts_dir / "1-grams.json").read_text())
     assert meta["num_documents"] == len(TEXTS)
     assert meta["num_tokens"] == sum(len(t) for t in TEXTS)
     assert meta["bos"] is bos
@@ -108,7 +108,7 @@ def test_counts_of_a_sample(tmp_path, reads):
     meta = json.loads(
         (
             tmp_path
-            / "someone--letters/default/train/hash_n4/char/counts/nobos/n1.json"
+            / "someone--letters/default/train/hash_n4/char/counts/nobos/1-grams.json"
         ).read_text()
     )
     assert meta["source"] == "hash_n4"
@@ -138,9 +138,11 @@ def test_tokenizer_name_sets_the_directory(tmp_path, reads):
     store = Store(tmp_path)
     store.counts(CORPUS, CharTokenizer(), [1], tokenizer_name="org/char-v2")
     corpus_dir = tmp_path / "someone--letters/default/train/all"
-    assert (corpus_dir / "org--char-v2/counts/nobos/n1.npy").exists()
+    assert (corpus_dir / "org--char-v2/counts/nobos/1-grams.npy").exists()
     assert not (corpus_dir / "char").exists()
-    meta = json.loads((corpus_dir / "org--char-v2/counts/nobos/n1.json").read_text())
+    meta = json.loads(
+        (corpus_dir / "org--char-v2/counts/nobos/1-grams.json").read_text()
+    )
     assert meta["tokenizer"] == "char"
     assert meta["tokenizer_name"] == "org/char-v2"
 
