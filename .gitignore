@@ -1,0 +1,8 @@
+.venv
+.vscode
+__pycache__/
+.ruff_cache
+.pytest_cache
+*.log
+AGENTS.md
+CLAUDE.md
