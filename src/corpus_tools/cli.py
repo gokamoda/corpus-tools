@@ -98,6 +98,21 @@ def build_parser() -> argparse.ArgumentParser:
         "e.g. openai-community/gpt2 for gpt2).",
     )
     count.add_argument(
+        "--cpus",
+        type=int,
+        default=None,
+        help="Threads that may run at once, in all: given to processes first "
+        "(one per shard), then to the tokenizer of each. Default: count in this "
+        "process, with the tokenizer's own number of threads.",
+    )
+    count.add_argument(
+        "--num-workers",
+        type=int,
+        default=None,
+        help="At most this many processes (each holds the counts of its shard in "
+        "memory). With it alone, CPUS is all CPUs of the job.",
+    )
+    count.add_argument(
         "--max-documents",
         type=int,
         default=None,
@@ -141,6 +156,8 @@ def main(argv: list[str] | None = None) -> None:
         bos=args.bos,
         max_documents=args.max_documents,
         tokenizer_name=tokenizer_name,
+        cpus=args.cpus,
+        num_workers=args.num_workers,
     )
     counts_dir = (
         store.tokenizer_dir(

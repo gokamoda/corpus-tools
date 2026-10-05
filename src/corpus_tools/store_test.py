@@ -10,10 +10,22 @@ from corpus_tools.corpus import Corpus
 from corpus_tools.count import count_ngrams
 from corpus_tools.sample import hash_sample
 from corpus_tools.store import Store
+from corpus_tools.tokenize import TokenizedCorpus, shard_name
 from corpus_tools.tokenize_test import CharTokenizer
 
 CORPUS = Corpus(dataset="someone/letters", name="default", split="train")
 TEXTS = ["abcab", "ba", "a", "", "zzza", "hello", "world", "abcab"] * 5
+NUM_FILES = 3  # shards of the stream
+
+
+def contiguous_part(items, num_shards, index):
+    size, extra = divmod(len(items), num_shards)
+    start = index * size + min(index, extra)
+    return items[start : start + size + (index < extra)]
+
+
+def tokenized_dir_of(tmp_path):
+    return tmp_path / "someone--letters/default/train/all/char/tokenized"
 
 
 @pytest.fixture
@@ -22,11 +34,18 @@ def reads(monkeypatch):
     calls = []
 
     @contextmanager
-    def fake_open_rows(corpus, *, revision=None, hf_cache_dir=None):
-        calls.append({"revision": revision, "hf_cache_dir": hf_cache_dir})
-        yield iter([{"text": t, "i": i} for i, t in enumerate(TEXTS)]), len(TEXTS)
+    def fake_open_rows(corpus, *, revision=None, hf_cache_dir=None, shard=None):
+        calls.append(
+            {"revision": revision, "hf_cache_dir": hf_cache_dir, "shard": shard}
+        )
+        rows = [{"text": t, "i": i} for i, t in enumerate(TEXTS)]
+        if shard is not None:
+            rows = contiguous_part(rows, *shard)
+        yield iter(rows), len(rows)
 
     monkeypatch.setattr(store_module, "open_rows", fake_open_rows)
+    monkeypatch.setattr(store_module, "stream_shards", lambda corpus, **_: NUM_FILES)
+    monkeypatch.setattr(store_module, "split_rows", lambda corpus, **_: len(TEXTS))
     monkeypatch.setattr(store_module, "dataset_revision", lambda corpus: "abc123")
     monkeypatch.setattr(store_module, "hub_model_id", lambda name: name)
     return calls
@@ -74,6 +93,10 @@ def test_counts_are_the_same_for_every_cache(tmp_path, reads, cache, bos):
     assert_same(counts, expected([1, 2, 3], bos_id=25 if bos else None))
     assert reads[0]["revision"] == "abc123"
     assert (reads[0]["hf_cache_dir"] is not None) == (cache == "corpus")
+    num_reads = 1 if cache == "corpus" else NUM_FILES  # with one process
+    assert sorted(r["shard"] for r in reads) == [
+        (num_reads, i) for i in range(num_reads)
+    ]
 
     counts_dir = tmp_path / "someone--letters/default/train/all/char/counts"
     counts_dir = counts_dir / ("bos" if bos else "nobos")
@@ -87,7 +110,7 @@ def test_counts_are_the_same_for_every_cache(tmp_path, reads, cache, bos):
 
     # made once; loaded afterwards
     store.counts(CORPUS, CharTokenizer(), [1, 2], cache=cache, bos=bos)
-    assert len(reads) == 1
+    assert len(reads) == num_reads
 
 
 def test_token_cache_is_shared_by_bos_and_new_n(tmp_path, reads):
@@ -95,7 +118,14 @@ def test_token_cache_is_shared_by_bos_and_new_n(tmp_path, reads):
     store.counts(CORPUS, CharTokenizer(), [1], cache="tokens")
     counts = store.counts(CORPUS, CharTokenizer(), [2], cache="tokens", bos=True)
     assert_same(counts, expected([2], bos_id=25))
-    assert len(reads) == 1
+    assert len(reads) == NUM_FILES
+
+    tokenized = TokenizedCorpus(tokenized_dir_of(tmp_path))
+    assert [d.tolist() for d in tokenized] == [
+        [ord(c) - ord("a") for c in t] for t in TEXTS
+    ]
+    assert tokenized.meta["num_shards"] == NUM_FILES
+    assert tokenized.meta["dataset_revision"] == "abc123"
 
 
 def test_counts_of_a_sample(tmp_path, reads):
@@ -196,4 +226,233 @@ def test_cli_sample_with_output_and_revision(tmp_path, reads, monkeypatch):
          "--revision", "r9", "--output", str(output), "--cache-dir", str(tmp_path)]
     )  # fmt: skip
     assert len(output.read_text().splitlines()) == 3
-    assert reads[-1] == {"revision": "r9", "hf_cache_dir": None}
+    assert reads[-1] == {"revision": "r9", "hf_cache_dir": None, "shard": None}
+
+
+def test_interrupted_token_cache_is_completed(tmp_path, reads):
+    store = Store(tmp_path)
+    store.counts(CORPUS, CharTokenizer(), [1], cache="tokens")
+    tokenized_dir = tokenized_dir_of(tmp_path)
+    counts_dir = tokenized_dir.parent / "counts/nobos"
+    # as if stopped while writing shard 1, before the counts were saved
+    shard = tokenized_dir / shard_name(1)
+    shard.rename(shard.with_name(shard.name + ".tmp"))
+    (counts_dir / "1-grams.npy").unlink()
+    reads.clear()
+
+    counts = store.counts(CORPUS, CharTokenizer(), [1, 2], cache="tokens")
+    assert_same(counts, expected([1, 2]))
+    assert [r["shard"] for r in reads] == [(NUM_FILES, 1)]  # only the missing shard
+    assert not (tokenized_dir / (shard_name(1) + ".tmp")).exists()
+
+
+def test_counts_without_their_file_are_made_again(tmp_path, reads):
+    store = Store(tmp_path)
+    counts_dir = tmp_path / "someone--letters/default/train/all/char/counts/nobos"
+    counts_dir.mkdir(parents=True)
+    # as if stopped after the meta was written, before the counts
+    (counts_dir / "2-grams.json").write_text("{}")
+    assert_same(store.counts(CORPUS, CharTokenizer(), [2]), expected([2]))
+    assert json.loads((counts_dir / "2-grams.json").read_text())["n"] == 2
+
+
+def test_token_cache_of_the_older_format_is_refused(tmp_path, reads):
+    tokenized_dir = tokenized_dir_of(tmp_path)
+    tokenized_dir.mkdir(parents=True)
+    (tokenized_dir / "tokens.bin").write_bytes(b"")
+    with pytest.raises(ValueError, match="older format"):
+        Store(tmp_path).counts(CORPUS, CharTokenizer(), [1], cache="tokens")
+
+
+def test_sample_without_its_file_is_made_again(tmp_path, reads):
+    store = Store(tmp_path)
+    path = store.sample_path(CORPUS, 3)
+    path.parent.mkdir(parents=True)
+    # as if stopped after the meta was written, before the sample was renamed
+    path.with_suffix(".meta.json").write_text('{"dataset_revision": "old"}')
+    path.with_name(path.name + ".partial").write_text("broken\n")
+    assert store.sample(CORPUS, 3, revision="r1") == path
+    assert len(path.read_text().splitlines()) == 3
+    meta = json.loads(path.with_suffix(".meta.json").read_text())
+    assert meta["dataset_revision"] == "r1"
+    assert not path.with_name(path.name + ".partial").exists()
+
+
+def test_sample_is_read_in_shards(tmp_path, reads, monkeypatch):
+    monkeypatch.setattr(store_module, "SAMPLE_SHARD_SIZE", 3)
+    store = Store(tmp_path)
+    store.sample(CORPUS, 8)
+    counts = store.counts(
+        CORPUS, CharTokenizer(), [1, 2], source="hash_n8", cache="tokens"
+    )
+    sample = hash_sample([{"text": t} for t in TEXTS], num_samples=8)
+    assert_same(counts, expected([1, 2], texts=[row["text"] for row in sample]))
+    tokenized = TokenizedCorpus(
+        tmp_path / "someone--letters/default/train/hash_n8/char/tokenized"
+    )
+    assert [len(shard) for shard in tokenized.shards] == [3, 3, 1]  # 7 distinct
+
+
+@pytest.fixture
+def parquet_corpus(tmp_path, monkeypatch):
+    """TEXTS in NUM_FILES local Parquet files, readable by worker processes."""
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    directory = tmp_path / "letters"
+    (directory / "data").mkdir(parents=True)
+    for i in range(NUM_FILES):
+        pq.write_table(
+            pa.table({"text": contiguous_part(TEXTS, NUM_FILES, i)}),
+            directory / "data" / f"train-{i:05d}-of-{NUM_FILES:05d}.parquet",
+        )
+    monkeypatch.setattr(store_module, "dataset_revision", lambda corpus: None)
+    monkeypatch.setattr(store_module, "hub_model_id", lambda name: name)
+    return Corpus(dataset=str(directory), name="default", split="train")
+
+
+@pytest.mark.parametrize("cache", ["none", "corpus", "tokens"])
+def test_counts_in_processes(tmp_path, parquet_corpus, cache, monkeypatch):
+    monkeypatch.setattr(store_module, "CACHED_SHARD_SIZE", 15)  # 3 shards
+    store = Store(tmp_path / "cache")
+    counts = store.counts(
+        parquet_corpus,
+        CharTokenizer(),
+        [1, 2, 3],
+        cache=cache,
+        bos=True,
+        cpus=2,
+    )
+    assert_same(counts, expected([1, 2, 3], bos_id=25))
+    tokenizer_dir = store.tokenizer_dir(parquet_corpus, "char")
+    meta = json.loads((tokenizer_dir / "counts/bos/2-grams.json").read_text())
+    assert meta["num_documents"] == len(TEXTS)
+    assert meta["num_tokens"] == sum(len(t) for t in TEXTS)
+    if cache == "tokens":
+        assert TokenizedCorpus(tokenizer_dir / "tokenized").meta["num_shards"] == 3
+
+
+def test_stopped_count_continues_from_its_shard_counts(tmp_path, reads, monkeypatch):
+    count_shard = store_module._count_shard
+
+    def fail_on_the_last_shard(task, tokenizer, position):
+        if task.index == NUM_FILES - 1:
+            raise KeyboardInterrupt
+        return count_shard(task, tokenizer, position)
+
+    monkeypatch.setattr(store_module, "_count_shard", fail_on_the_last_shard)
+    store = Store(tmp_path)
+    with pytest.raises(KeyboardInterrupt):
+        store.counts(CORPUS, CharTokenizer(), [1, 2])
+    shards_dir = (
+        tmp_path / "someone--letters/default/train/all/char/counts/nobos/shards"
+    )
+    assert sorted(p.name for p in shards_dir.iterdir()) == [
+        "plan.json", "shard-00000", "shard-00001",
+    ]  # fmt: skip
+
+    monkeypatch.setattr(store_module, "_count_shard", count_shard)
+    reads.clear()
+    assert_same(store.counts(CORPUS, CharTokenizer(), [1, 2]), expected([1, 2]))
+    assert [r["shard"] for r in reads] == [(NUM_FILES, NUM_FILES - 1)]
+    assert not shards_dir.exists()  # removed once added up
+
+
+def test_shard_counts_of_another_plan_are_not_used(tmp_path, reads, monkeypatch):
+    count_shard = store_module._count_shard
+
+    def fail_on_the_last_shard(task, tokenizer, position):
+        if task.index == NUM_FILES - 1:
+            raise KeyboardInterrupt
+        return count_shard(task, tokenizer, position)
+
+    monkeypatch.setattr(store_module, "_count_shard", fail_on_the_last_shard)
+    store = Store(tmp_path)
+    with pytest.raises(KeyboardInterrupt):
+        store.counts(CORPUS, CharTokenizer(), [1, 2])
+    monkeypatch.setattr(store_module, "_count_shard", count_shard)
+    reads.clear()
+    # other n: the shards are counted again
+    assert_same(store.counts(CORPUS, CharTokenizer(), [2, 3]), expected([2, 3]))
+    assert len(reads) == NUM_FILES
+
+
+def test_cached_split_is_read_in_shards_of_a_fixed_size(tmp_path, reads, monkeypatch):
+    monkeypatch.setattr(store_module, "CACHED_SHARD_SIZE", 15)
+    counts = Store(tmp_path).counts(CORPUS, CharTokenizer(), [1, 2], cache="corpus")
+    assert_same(counts, expected([1, 2]))
+    assert sorted(r["shard"] for r in reads) == [(3, 0), (3, 1), (3, 2)]  # 40 / 15
+
+
+def test_error_in_a_worker(tmp_path, parquet_corpus):
+    # an upper-case letter is out of the vocabulary of CharTokenizer
+    data = Path(parquet_corpus.dataset) / "data"
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    bad = sorted(data.iterdir())[1]
+    pq.write_table(pa.table({"text": ["abc", "ABC"]}), bad)
+    store = Store(tmp_path / "cache")
+    with pytest.raises(ValueError):
+        store.counts(parquet_corpus, CharTokenizer(), [1], num_workers=2)
+    shards_dir = store.tokenizer_dir(parquet_corpus, "char") / "counts/nobos/shards"
+    # the shard counted next to the bad one was finished and kept
+    assert (shards_dir / shard_name(0)).is_dir()
+    assert not (shards_dir / shard_name(1)).exists()
+
+
+def test_script_without_main_guard_ends_with_an_error(tmp_path, parquet_corpus):
+    import subprocess
+    import sys
+
+    script = tmp_path / "count.py"
+    script.write_text(
+        "from corpus_tools import Store\n"
+        "from corpus_tools.corpus import Corpus\n"
+        "from corpus_tools.tokenize_test import CharTokenizer\n"
+        f"corpus = Corpus({parquet_corpus.dataset!r}, 'default')\n"
+        f"Store({str(tmp_path / 'cache')!r}).counts(\n"
+        "    corpus, CharTokenizer(), [1], num_workers=2, tokenizer_name='char'\n"
+        ")\n"
+    )
+    result = subprocess.run(
+        [sys.executable, str(script)],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    assert result.returncode != 0
+    assert 'if __name__ == "__main__":' in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("num_tasks", "cpus", "num_workers", "expected"),
+    [
+        (80, None, None, (1, None)),  # in this process, as the tokenizer likes
+        (80, 16, None, (16, 1)),  # processes first
+        (4, 16, None, (4, 4)),  # few shards: the rest to threads
+        (15, 16, None, (15, 1)),
+        (80, 16, 4, (4, 4)),  # num_workers caps the processes
+        (80, 1, None, (1, 1)),  # one process, one thread
+        (2, None, 4, (2, 6)),  # the job's 12 CPUs
+    ],
+)
+def test_workers(monkeypatch, num_tasks, cpus, num_workers, expected):
+    monkeypatch.setattr(store_module, "available_cpus", lambda: 12)
+    assert store_module._workers(num_tasks, cpus, num_workers) == expected
+
+
+def test_worker_sets_the_tokenizer_threads(monkeypatch):
+    import multiprocessing
+    import queue
+
+    monkeypatch.delenv("RAYON_NUM_THREADS", raising=False)
+    positions = queue.Queue()
+    positions.put(3)
+    lock = multiprocessing.get_context("spawn").RLock()
+    monkeypatch.setattr(store_module.tqdm, "set_lock", lambda lock: None)
+    monkeypatch.setattr(store_module, "_worker", {})
+    store_module._init_worker("tokenizer", 4, positions, lock)
+    assert store_module.os.environ["RAYON_NUM_THREADS"] == "4"
+    assert store_module._worker == {"tokenizer": "tokenizer", "position": 3}

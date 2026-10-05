@@ -43,6 +43,8 @@ rows = load_hash_sample(store.sample(preset("openwebtext"), 10_000))
 corpus-tools count --corpus openwebtext --tokenizer openai-community/gpt2 --n 1 2
 corpus-tools count --corpus tinystories --tokenizer openai-community/gpt2 --n 1 2 3 --cache tokens
 corpus-tools count --corpus openwebtext --tokenizer openai-community/gpt2 --n 1 2 --source hash_n10000 --bos
+# 16 スレッド分を使って並列に数える（openwebtext なら 16 プロセス）
+corpus-tools count --corpus openwebtext --tokenizer openai-community/gpt2 --n 1 2 --cpus 16
 ```
 
 ```python
@@ -50,4 +52,4 @@ counts = store.counts(preset("openwebtext"), "openai-community/gpt2", [1, 2])
 # {1: ndarray[V], 2: csr_matrix[V, V]}
 ```
 
-数え方の規則、保存先の構成、cache の選び方は `AGENTS.md` にある。
+数え方の規則、保存先の構成、cache の選び方、並列の仕組みは `AGENTS.md` にある。途中で止めても、次は続きから数える。

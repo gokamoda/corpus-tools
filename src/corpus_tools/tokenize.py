@@ -4,11 +4,16 @@ Texts are tokenized as they are, without special tokens
 (``add_special_tokens=False``) and without adding a leading space. A BOS
 token, if wanted, is added when counting (see ``count.py``).
 
-The cache holds the token ids of all documents in one flat array
-(``tokens.bin``; uint16 if the vocabulary fits, else uint32) and the start of
-each document in ``offsets.npy`` (int64, one more entry than documents).
+The cache is a directory of shards (``shard-00000/``, ...) and ``meta.json``
+(with ``num_shards``). A shard holds the token ids of its documents in one
+flat array (``tokens.bin``; uint16 if the vocabulary fits, else uint32), the
+start of each document in ``offsets.npy`` (int64, one more entry than
+documents), and its own ``meta.json``. A shard is written under
+``shard-XXXXX.tmp/`` and renamed when complete, so a shard directory without
+``.tmp`` is always complete.
 """
 
+import itertools
 import json
 import shutil
 from collections.abc import Iterable, Iterator
@@ -41,8 +46,12 @@ def _encode(batch: list[str], tokenizer: Any) -> Iterator[np.ndarray]:
         yield np.asarray(ids, dtype=np.int64)
 
 
-class TokenizedCorpus:
-    """Token ids of a corpus, read lazily from a cache directory."""
+def shard_name(index: int) -> str:
+    return f"shard-{index:05d}"
+
+
+class TokenizedShard:
+    """Token ids of the documents of one shard, read lazily."""
 
     def __init__(self, directory: Path):
         self.directory = directory
@@ -65,10 +74,6 @@ class TokenizedCorpus:
         for start, end in zip(self.offsets[:-1], self.offsets[1:]):
             yield self.tokens[start:end]
 
-    @staticmethod
-    def exists(directory: Path) -> bool:
-        return (directory / "meta.json").exists()
-
     @classmethod
     def write(
         cls,
@@ -77,11 +82,11 @@ class TokenizedCorpus:
         *,
         vocab_size: int,
         meta: dict[str, Any] | None = None,
-    ) -> "TokenizedCorpus":
+    ) -> "TokenizedShard":
         """Save token ids of ``docs`` to ``directory``.
 
         Writes to a temporary directory first, so an interrupted run leaves no
-        cache that looks complete.
+        shard that looks complete.
         """
         dtype = token_dtype(vocab_size)
         tmp = directory.with_name(directory.name + ".tmp")
@@ -108,3 +113,36 @@ class TokenizedCorpus:
             shutil.rmtree(directory)
         tmp.rename(directory)
         return cls(directory)
+
+
+class TokenizedCorpus:
+    """Token ids of a corpus, read lazily from its complete shards."""
+
+    def __init__(self, directory: Path):
+        self.directory = directory
+        self.meta = json.loads((directory / "meta.json").read_text())
+        self.shards = [
+            TokenizedShard(directory / shard_name(i))
+            for i in range(self.meta["num_shards"])
+        ]
+        self.starts = np.cumsum([0] + [len(shard) for shard in self.shards])
+
+    def __len__(self) -> int:
+        return int(self.starts[-1])
+
+    def __getitem__(self, index: int) -> np.ndarray:
+        if not 0 <= index < len(self):
+            raise IndexError(index)
+        shard = int(np.searchsorted(self.starts, index, side="right")) - 1
+        return self.shards[shard][index - int(self.starts[shard])]
+
+    def __iter__(self) -> Iterator[np.ndarray]:
+        return itertools.chain.from_iterable(self.shards)
+
+    @staticmethod
+    def is_complete(directory: Path) -> bool:
+        meta_path = directory / "meta.json"
+        if not meta_path.exists():
+            return False
+        num_shards = json.loads(meta_path.read_text())["num_shards"]
+        return all((directory / shard_name(i)).is_dir() for i in range(num_shards))

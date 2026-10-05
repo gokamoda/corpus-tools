@@ -84,11 +84,14 @@ def count_ngrams(
     bos_id: int | None = None,
     flush_every: int = 200_000_000,
     total: int | None = None,
+    desc: str = "Counting",
+    position: int | None = None,
 ) -> dict[int, Counts]:
     """Counts of the n-grams of each n in ``ns`` over ``docs`` (token id arrays).
 
     With ``bos_id``, that token is put at the start of every document before
-    counting.
+    counting. ``position`` puts the progress bar on that line, and removes it
+    when done (for one bar per process).
     """
     if not ns or min(ns) < 1:
         raise ValueError("ns must be a non-empty list of positive integers")
@@ -99,7 +102,15 @@ def count_ngrams(
         n: _NgramAccumulator(n, vocab_size, flush_every) for n in set(ns) if n >= 2
     }
     bos = None if bos_id is None else np.array([bos_id], dtype=np.int64)
-    for doc in tqdm(docs, total=total, desc="Counting", mininterval=10.0):
+    progress = tqdm(
+        docs,
+        total=total,
+        desc=desc,
+        position=position,
+        leave=position is None,
+        mininterval=10.0,
+    )
+    for doc in progress:
         ids = np.asarray(doc, dtype=np.int64)
         if bos is not None:
             ids = np.concatenate([bos, ids])

@@ -7,26 +7,42 @@ Layout under the cache directory (``Store(cache_dir)``, default
     <dataset>/<name>/<split>/               e.g. Skylion007--openwebtext/plain_text/train
         samples/hash_n10000.jsonl           hash sample (+ .meta.json)
         <source>/<tokenizer>/               source = all | hash_n10000 (| ..._head100)
-            tokenized/                      tokens.bin, offsets.npy, meta.json
+            tokenized/                      meta.json, shard-00000/ (tokens.bin, offsets.npy, meta.json), ...
             counts/nobos/1-grams.npy, 2-grams.npz   counts (+ 1-grams.json, ...)
             counts/bos/...                  counts with BOS put before each document
 
-A file that already exists is loaded instead of being made again.
+A file that already exists is loaded instead of being made again. Files are
+written under a temporary name and renamed last, so a file (or shard
+directory) that exists is complete.
 """
 
 import itertools
 import json
+import multiprocessing
+import os
+import shutil
 from collections.abc import Iterable, Iterator
+from concurrent.futures import ProcessPoolExecutor, as_completed
+from concurrent.futures.process import BrokenProcessPool
 from contextlib import contextmanager
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from importlib.metadata import version
 from pathlib import Path
 from typing import Any, Literal, cast
 
 import numpy as np
+from tqdm import tqdm
 
-from corpus_tools.corpus import Corpus, dataset_revision, open_rows
+from corpus_tools.corpus import (
+    Corpus,
+    dataset_revision,
+    open_rows,
+    split_rows,
+    stream_shards,
+)
 from corpus_tools.sample import sample_name, save_hash_sample
+from corpus_tools.tokenize import shard_name
 
 DEFAULT_CACHE_DIR = "~/.cache/corpus-tools"
 ALL = "all"
@@ -44,7 +60,9 @@ def _now() -> str:
 
 def _write_json(path: Path, data: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+    tmp.rename(path)
 
 
 def hub_model_id(name: str) -> str:
@@ -84,16 +102,19 @@ def make_sample(
 
     ``revision`` pins the dataset to a commit (default: the latest, which is
     recorded). Writes ``output_path`` (overwritten if it exists) and the meta
-    file next to it (``.meta.json``).
+    file next to it (``.meta.json``). The sample is renamed to
+    ``output_path`` last, so it exists only when both are complete.
     """
     revision = revision or dataset_revision(corpus)
+    output_path.unlink(missing_ok=True)  # not to be left with the new meta
+    partial_path = output_path.with_name(output_path.name + ".partial")
     with open_rows(corpus, revision=revision, hf_cache_dir=hf_cache_dir) as (
         rows,
         total,
     ):
         num_rows = save_hash_sample(
             rows,
-            output_path,
+            partial_path,
             num_samples=num_samples,
             key_field=corpus.text_field,
             max_chars=max_chars,
@@ -112,6 +133,7 @@ def make_sample(
             "created": _now(),
         },
     )
+    partial_path.rename(output_path)
     return output_path
 
 
@@ -197,6 +219,8 @@ class Store:
         bos: bool = False,
         max_documents: int | None = None,
         tokenizer_name: str | None = None,
+        cpus: int | None = None,
+        num_workers: int | None = None,
         batch_size: int = 1000,
         flush_every: int = 200_000_000,
     ) -> dict[int, Any]:
@@ -211,26 +235,34 @@ class Store:
         - "corpus": read it through the Hugging Face cache under the cache directory;
         - "tokens": tokenize it once into ``tokenized/`` and count from there.
 
+        The corpus is read in shards (see ``_num_shards``). ``cpus`` is how
+        many threads may run at once, in all; they are given to processes
+        first (one per shard, at most ``num_workers``), and the rest to the
+        tokenizer of each process (see ``_workers``). Without either, the
+        shards are counted in this process, and the tokenizer uses its own
+        number of threads. Each process holds the counts of its shard in
+        memory. The counts of each shard are saved under
+        ``counts/<bos>/shards/`` and removed once added up, so that a stopped
+        run is continued from the shards not yet counted.
+
         Results are saved under ``tokenizer_name`` (default: the canonical Hub
         id of the tokenizer's ``name_or_path``, so "gpt2" and
         "openai-community/gpt2" share their results). Give another name for a tokenizer changed after
         loading, so that its counts are not mixed with the original's.
         """
         try:
-            from corpus_tools.count import (
-                count_ngrams,
-                counts_filename,
-                load_counts,
-                save_counts,
-            )
+            from corpus_tools.count import counts_filename, load_counts, save_counts
         except ImportError as error:
             raise ImportError(
                 "Counting needs the extra: corpus-tools[count]"
             ) from error
-        from corpus_tools.tokenize import TokenizedCorpus, tokenize
 
         if cache not in ("none", "corpus", "tokens"):
             raise ValueError(f"Unknown cache mode {cache!r}")
+        if cpus is not None and cpus < 1:
+            raise ValueError("cpus must be at least 1")
+        if num_workers is not None and num_workers < 1:
+            raise ValueError("num_workers must be at least 1")
         if isinstance(tokenizer, str):
             from transformers import AutoTokenizer
 
@@ -260,7 +292,7 @@ class Store:
                     "give another tokenizer_name"
                 )
         if missing:
-            meta = {
+            meta: dict[str, Any] = {
                 **_corpus_meta(corpus),
                 **self._source_meta(corpus, source),
                 "max_documents": max_documents,
@@ -270,50 +302,60 @@ class Store:
                 "transformers_version": version("transformers"),
                 "rules": COUNT_RULES,
             }
-            stats = {"num_documents": 0, "num_tokens": 0}
+            texts = _Texts(
+                corpus=corpus,
+                revision=meta["dataset_revision"],
+                hf_cache_dir=self.hf_cache_dir if cache == "corpus" else None,
+                sample_path=None
+                if source == ALL
+                else self.corpus_dir(corpus) / "samples" / f"{source}.jsonl",
+                max_documents=max_documents,
+                sample_shard_size=SAMPLE_SHARD_SIZE,
+            )
+            tokenized_dir = None
             if cache == "tokens":
                 tokenized_dir = tokenizer_dir / "tokenized"
-                if not TokenizedCorpus.exists(tokenized_dir):
-                    with self._open_texts(corpus, source, meta, max_documents) as (
-                        texts,
-                        _,
-                    ):
-                        TokenizedCorpus.write(
-                            tokenize(texts, tokenizer, batch_size=batch_size),
-                            tokenized_dir,
-                            vocab_size=vocab_size,
-                            meta={**meta, "created": _now()},
-                        )
-                docs = TokenizedCorpus(tokenized_dir)
-                if docs.meta["vocab_size"] != vocab_size:
-                    raise ValueError(f"{tokenized_dir} has another vocabulary size")
+                texts, num_shards = _prepare_tokenized(tokenized_dir, texts, meta)
                 # the counts are of the data that was tokenized, not of today's
-                meta["dataset_revision"] = docs.meta.get("dataset_revision")
-                computed = count_ngrams(
-                    _tally(docs, stats),
-                    missing,
-                    vocab_size,
-                    bos_id=bos_id,
-                    flush_every=flush_every,
-                    total=len(docs),
-                )
+                meta["dataset_revision"] = texts.revision
             else:
-                with self._open_texts(
-                    corpus, source, meta, max_documents, cache_corpus=cache == "corpus"
-                ) as (texts, total):
-                    computed = count_ngrams(
-                        _tally(
-                            tokenize(texts, tokenizer, batch_size=batch_size), stats
-                        ),
-                        missing,
-                        vocab_size,
-                        bos_id=bos_id,
-                        flush_every=flush_every,
-                        total=total,
-                    )
+                num_shards = _num_shards(texts)
+            shards_dir = counts_dir / "shards"
+            _prepare_shard_counts(
+                shards_dir,
+                {
+                    "ns": missing,
+                    "num_shards": num_shards,
+                    "shard_by": _shard_by(texts),
+                    "dataset_revision": texts.revision,
+                    "vocab_size": vocab_size,
+                },
+            )
+            tasks = [
+                _Task(
+                    texts=texts,
+                    index=index,
+                    num_shards=num_shards,
+                    ns=tuple(missing),
+                    vocab_size=vocab_size,
+                    bos_id=bos_id,
+                    batch_size=batch_size,
+                    flush_every=flush_every,
+                    counts_dir=shards_dir / shard_name(index),
+                    tokenized_dir=None
+                    if tokenized_dir is None
+                    else tokenized_dir / shard_name(index),
+                    tokenized_meta={**meta, "shard": index, "num_shards": num_shards},
+                )
+                for index in range(num_shards)
+                if not (shards_dir / shard_name(index)).is_dir()
+            ]
+            processes, threads = _workers(len(tasks), cpus, num_workers)
+            _run(tasks, tokenizer, num_shards, processes, threads)
+            computed, stats = _add_shard_counts(shards_dir, missing, num_shards)
             for n, counts in computed.items():
                 path = counts_dir / counts_filename(n)
-                save_counts(counts, path)
+                # the meta first: the counts file is the sign that both are complete
                 _write_json(
                     path.with_suffix(".json"),
                     {
@@ -336,9 +378,9 @@ class Store:
                         "created": _now(),
                     },
                 )
+                save_counts(counts, path)
+            shutil.rmtree(shards_dir)
         return {n: load_counts(counts_dir / counts_filename(n)) for n in ns}
-
-    # reading
 
     def _source_meta(self, corpus: Corpus, source: str) -> dict[str, Any]:
         if source == ALL:
@@ -351,43 +393,334 @@ class Store:
             "dataset_revision": sample_meta.get("dataset_revision"),
         }
 
-    @contextmanager
-    def _open_rows(
-        self, corpus: Corpus, revision: str | None, cache_corpus: bool
-    ) -> Iterator[tuple[Iterator[dict[str, Any]], int | None]]:
-        with open_rows(
-            corpus,
-            revision=revision,
-            hf_cache_dir=self.hf_cache_dir if cache_corpus else None,
-        ) as opened:
-            yield opened
 
-    @contextmanager
-    def _open_texts(
-        self,
-        corpus: Corpus,
-        source: str,
-        meta: dict[str, Any],
-        max_documents: int | None,
-        *,
-        cache_corpus: bool = False,
-    ) -> Iterator[tuple[Iterator[str], int | None]]:
-        if source == ALL:
-            with self._open_rows(corpus, meta["dataset_revision"], cache_corpus) as (
-                rows,
+# reading in shards
+
+SAMPLE_SHARD_SIZE = 10_000  # documents of a hash sample in a shard
+CACHED_SHARD_SIZE = 100_000  # documents in a shard of a split in the HF cache
+
+
+@dataclass(frozen=True)
+class _Texts:
+    """Where the texts to count are read from (sent to worker processes)."""
+
+    corpus: Corpus
+    revision: str | None
+    hf_cache_dir: Path | None = None  # read through the Hugging Face cache
+    sample_path: Path | None = None  # a hash sample instead of the whole split
+    max_documents: int | None = None
+    sample_shard_size: int = SAMPLE_SHARD_SIZE
+
+
+@dataclass(frozen=True)
+class _Task:
+    """Count one shard into ``counts_dir``; with ``tokenized_dir``, through
+    its token cache."""
+
+    texts: _Texts
+    index: int
+    num_shards: int
+    ns: tuple[int, ...]
+    vocab_size: int
+    bos_id: int | None
+    batch_size: int
+    flush_every: int
+    counts_dir: Path
+    tokenized_dir: Path | None
+    tokenized_meta: dict[str, Any]
+
+
+def _num_shards(texts: _Texts) -> int:
+    """How many shards the texts are read in.
+
+    The shards do not depend on the number of processes, so that a run that
+    was stopped can be completed with any number of them:
+
+    - the whole split, streamed: its files;
+    - the whole split, from the Hugging Face cache: CACHED_SHARD_SIZE
+      documents each (made equal);
+    - a hash sample: sample_shard_size documents each;
+    - with max_documents: one shard, the first documents.
+    """
+    if texts.max_documents is not None:
+        return 1
+    if texts.sample_path is not None:
+        if not texts.sample_path.exists():
+            raise FileNotFoundError(
+                f"{texts.sample_path} not found; make the sample first"
+            )
+        with texts.sample_path.open() as sample_file:
+            num_rows = sum(1 for _ in sample_file)
+        return max(1, -(-num_rows // texts.sample_shard_size))
+    if texts.hf_cache_dir is not None:
+        num_rows = split_rows(
+            texts.corpus, revision=texts.revision, hf_cache_dir=texts.hf_cache_dir
+        )
+        return max(1, -(-num_rows // CACHED_SHARD_SIZE))
+    return stream_shards(texts.corpus, revision=texts.revision)
+
+
+def _shard_by(texts: _Texts) -> str:
+    """How the texts are split into shards (shards of another split differ)."""
+    if texts.max_documents is not None:
+        return f"head{texts.max_documents}"
+    if texts.sample_path is not None:
+        return f"sample/{texts.sample_shard_size}"
+    if texts.hf_cache_dir is not None:
+        return "cached rows"
+    return "files"
+
+
+@contextmanager
+def _open_shard(
+    texts: _Texts, index: int, num_shards: int
+) -> Iterator[tuple[Iterator[str], int | None]]:
+    """Texts of shard ``index`` and their number (None if unknown)."""
+    field = texts.corpus.text_field
+    if texts.sample_path is not None:
+        with texts.sample_path.open() as sample_file:
+            start = index * texts.sample_shard_size
+            stop = None if index == num_shards - 1 else start + texts.sample_shard_size
+            lines = itertools.islice(sample_file, start, stop)
+            yield _head(
+                (json.loads(line)[field] for line in lines), None, texts.max_documents
+            )
+        return
+    shard = None if texts.max_documents is not None else (num_shards, index)
+    with open_rows(
+        texts.corpus,
+        revision=texts.revision,
+        hf_cache_dir=texts.hf_cache_dir,
+        shard=shard,
+    ) as (rows, total):
+        yield _head((row[field] for row in rows), total, texts.max_documents)
+
+
+def _prepare_tokenized(
+    tokenized_dir: Path, texts: _Texts, meta: dict[str, Any]
+) -> tuple[_Texts, int]:
+    """The texts and number of shards of the token cache, started if new.
+
+    A cache that was started before keeps its shards and its dataset revision,
+    so that the shards still to make are read like the ones already made.
+    """
+    if (tokenized_dir / "tokens.bin").exists():
+        raise ValueError(
+            f"{tokenized_dir} is a token cache of an older format; "
+            "remove it to make it again"
+        )
+    meta_path = tokenized_dir / "meta.json"
+    if meta_path.exists():
+        saved = json.loads(meta_path.read_text())
+        if saved["vocab_size"] != meta["vocab_size"]:
+            raise ValueError(f"{tokenized_dir} has another vocabulary size")
+        texts = replace(texts, revision=saved.get("dataset_revision"))
+        return texts, saved["num_shards"]
+    num_shards = _num_shards(texts)
+    _write_json(meta_path, {**meta, "num_shards": num_shards, "created": _now()})
+    return texts, num_shards
+
+
+# counts of each shard, kept until they are added up
+
+
+def _prepare_shard_counts(shards_dir: Path, plan: dict[str, Any]) -> None:
+    """Keep the shard counts of a stopped run only if made by the same plan.
+
+    The plan (which n, which shards, which data) is in ``plan.json``; shard
+    counts of another plan are removed, as they cannot be added up with the
+    new ones.
+    """
+    plan_path = shards_dir / "plan.json"
+    plan = json.loads(json.dumps(plan))  # as it reads back
+    if shards_dir.exists() and (
+        not plan_path.exists() or json.loads(plan_path.read_text()) != plan
+    ):
+        shutil.rmtree(shards_dir)
+    if not shards_dir.exists():
+        _write_json(plan_path, plan)
+
+
+def _save_shard_counts(
+    counts: dict[int, Any], stats: dict[str, int], directory: Path
+) -> None:
+    """Write under ``<shard>.tmp/`` and rename: a shard directory is complete."""
+    from corpus_tools.count import counts_filename, save_counts
+
+    tmp = directory.with_name(directory.name + ".tmp")
+    if tmp.exists():
+        shutil.rmtree(tmp)
+    tmp.mkdir(parents=True)
+    for n, value in counts.items():
+        save_counts(value, tmp / counts_filename(n))
+    _write_json(tmp / "meta.json", stats)
+    tmp.rename(directory)
+
+
+def _add_shard_counts(
+    shards_dir: Path, ns: list[int], num_shards: int
+) -> tuple[dict[int, Any], dict[str, int]]:
+    """The counts and stats of all shards, added up (one shard in memory at a time)."""
+    from corpus_tools.count import counts_filename, load_counts
+
+    total: dict[int, Any] = {}
+    stats = {"num_documents": 0, "num_tokens": 0}
+    for index in tqdm(range(num_shards), desc="Adding up shards", mininterval=10.0):
+        directory = shards_dir / shard_name(index)
+        for key, value in json.loads((directory / "meta.json").read_text()).items():
+            stats[key] += value
+        for n in ns:
+            value = load_counts(directory / counts_filename(n))
+            total[n] = value if n not in total else total[n] + value
+    for value in total.values():
+        if not isinstance(value, np.ndarray):
+            value.sum_duplicates()
+            value.sort_indices()
+    return total, stats
+
+
+# counting in processes
+
+_worker: dict[str, Any] = {}  # the tokenizer and progress bar line of a worker
+
+
+def available_cpus() -> int:
+    """CPUs this process may use (those of its job on a cluster)."""
+    if hasattr(os, "process_cpu_count"):  # Python 3.13
+        return os.process_cpu_count() or 1
+    if hasattr(os, "sched_getaffinity"):  # Linux
+        return len(os.sched_getaffinity(0))
+    return os.cpu_count() or 1
+
+
+def _workers(
+    num_tasks: int, cpus: int | None, num_workers: int | None
+) -> tuple[int, int | None]:
+    """Processes, and tokenizer threads in each (None: count in this process,
+    with the tokenizer's own number of threads).
+
+    Processes come first, as they run reading and counting in parallel too,
+    while threads only tokenize (one shard of OpenWebText with GPT-2: about
+    200 seconds of tokenizing, split over the threads, and 53 of the rest).
+    """
+    if cpus is None and num_workers is None:
+        return 1, None
+    budget = available_cpus() if cpus is None else cpus
+    processes = max(1, min(budget, num_workers or budget, num_tasks))
+    return processes, max(1, budget // processes)
+
+
+def _init_worker(tokenizer: Any, threads: int, positions: Any, lock: Any) -> None:
+    # read by the tokenizer (Rust's rayon) when it first tokenizes a batch
+    os.environ["RAYON_NUM_THREADS"] = str(threads)
+    tqdm.set_lock(lock)
+    _worker["tokenizer"] = tokenizer
+    _worker["position"] = positions.get()
+
+
+def _count_shard_in_worker(task: _Task) -> int:
+    return _count_shard(task, _worker["tokenizer"], _worker["position"])
+
+
+def _count_shard(task: _Task, tokenizer: Any, position: int) -> int:
+    """Count one shard and save its counts; returns the shard's index."""
+    from corpus_tools.count import count_ngrams
+    from corpus_tools.tokenize import TokenizedShard, tokenize
+
+    label = f"shard {task.index + 1}/{task.num_shards}"
+    stats = {"num_documents": 0, "num_tokens": 0}
+    counting = {
+        "ns": list(task.ns),
+        "vocab_size": task.vocab_size,
+        "bos_id": task.bos_id,
+        "flush_every": task.flush_every,
+        "desc": f"Counting {label}",
+        "position": position,
+    }
+    if task.tokenized_dir is None:
+        with _open_shard(task.texts, task.index, task.num_shards) as (texts, total):
+            docs = tokenize(texts, tokenizer, batch_size=task.batch_size)
+            counts = count_ngrams(_tally(docs, stats), total=total, **counting)
+    else:
+        if not task.tokenized_dir.is_dir():
+            with _open_shard(task.texts, task.index, task.num_shards) as (
+                texts,
                 total,
             ):
-                texts = (row[corpus.text_field] for row in rows)
-                yield _head(texts, total, max_documents)
-            return
-        path = self.corpus_dir(corpus) / "samples" / f"{source}.jsonl"
-        if not path.exists():
-            raise FileNotFoundError(f"{path} not found; make the sample first")
-        with path.open() as sample_file:
-            total = sum(1 for _ in sample_file)
-            sample_file.seek(0)
-            texts = (json.loads(line)[corpus.text_field] for line in sample_file)
-            yield _head(texts, total, max_documents)
+                TokenizedShard.write(
+                    tqdm(
+                        tokenize(texts, tokenizer, batch_size=task.batch_size),
+                        total=total,
+                        desc=f"Tokenizing {label}",
+                        position=position,
+                        leave=False,
+                        mininterval=10.0,
+                    ),
+                    task.tokenized_dir,
+                    vocab_size=task.vocab_size,
+                    meta={**task.tokenized_meta, "created": _now()},
+                )
+        shard = TokenizedShard(task.tokenized_dir)
+        counts = count_ngrams(_tally(shard, stats), total=len(shard), **counting)
+    _save_shard_counts(counts, stats, task.counts_dir)
+    return task.index
+
+
+def _run(
+    tasks: list[_Task],
+    tokenizer: Any,
+    num_shards: int,
+    processes: int,
+    threads: int | None,
+) -> None:
+    """Count the shards of the tasks in ``processes`` worker processes with
+    ``threads`` tokenizer threads each, or here if ``threads`` is None.
+
+    Each worker shows its progress bar on its own line (1, 2, ...), under
+    the bar of all shards on line 0. On an error, the workers end the shards
+    they are on (and save them) before the error is raised.
+    """
+    progress = tqdm(
+        total=num_shards, initial=num_shards - len(tasks), desc="Shards", position=0
+    )
+    if threads is None:
+        for task in tasks:
+            _count_shard(task, tokenizer, position=1)
+            progress.update()
+        progress.close()
+        return
+    # spawn, not fork: a forked tokenizer or stream reader may hang or turn
+    # off its threads
+    context = multiprocessing.get_context("spawn")
+    positions = context.Queue()
+    for position in range(1, processes + 1):
+        positions.put(position)
+    lock = context.RLock()  # for the bars of all processes to be written in turn
+    tqdm.set_lock(lock)
+    # an executor, not a Pool: a Pool restarts a worker that dies on starting
+    # (a script without `if __name__ == "__main__":`) forever, and hangs
+    with ProcessPoolExecutor(
+        processes,
+        mp_context=context,
+        initializer=_init_worker,
+        initargs=(tokenizer, threads, positions, lock),
+    ) as executor:
+        try:
+            futures = [executor.submit(_count_shard_in_worker, task) for task in tasks]
+            for future in as_completed(futures):
+                future.result()
+                progress.update()
+        except BrokenProcessPool as error:
+            raise RuntimeError(
+                "A worker process ended. If counting from a script with "
+                'cpus or num_workers, run it under `if __name__ == "__main__":`, '
+                "since every worker imports the script."
+            ) from error
+        finally:
+            # shards not started are dropped; the executor then waits for
+            # the ones being counted
+            executor.shutdown(wait=False, cancel_futures=True)
+            progress.close()
 
 
 def _head(

@@ -12,6 +12,7 @@ import traceback
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
+from functools import cache
 from pathlib import Path
 from typing import Any, NoReturn
 
@@ -48,32 +49,61 @@ def preset(alias: str, split: str = "train", name: str | None = None) -> Corpus:
     return Corpus(dataset=dataset, name=name, split=split)
 
 
+@cache
+def _load_split(corpus: Corpus, revision: str | None, hf_cache_dir: Path | None):
+    """The split, loaded once per process (a stream resolves its files on loading)."""
+    from datasets import load_dataset
+
+    return load_dataset(
+        corpus.dataset,
+        name=corpus.name,
+        split=corpus.split,
+        streaming=hf_cache_dir is None,
+        revision=revision,
+        cache_dir=None if hf_cache_dir is None else str(hf_cache_dir),
+    )
+
+
+def stream_shards(corpus: Corpus, *, revision: str | None = None) -> int:
+    """Number of shards (files) the split is streamed in."""
+    return _load_split(corpus, revision, None).num_shards
+
+
+def split_rows(
+    corpus: Corpus, *, hf_cache_dir: Path, revision: str | None = None
+) -> int:
+    """Number of rows of the split, downloaded into the Hugging Face cache here
+    (so that processes reading parts of it later do not download it at once)."""
+    return len(_load_split(corpus, revision, hf_cache_dir))
+
+
 @contextmanager
 def open_rows(
     corpus: Corpus,
     *,
     revision: str | None = None,
     hf_cache_dir: Path | None = None,
+    shard: tuple[int, int] | None = None,
 ) -> Iterator[tuple[Iterator[dict[str, Any]], int | None]]:
     """Rows of the corpus and their number (None if unknown).
 
     With ``hf_cache_dir`` the dataset is downloaded into that directory (or
     read from it if already there); otherwise it is streamed. ``revision``
-    pins the dataset to a commit of its Hub repository.
+    pins the dataset to a commit of its Hub repository. ``shard`` =
+    (num_shards, index) reads only that contiguous part of the rows: of the
+    files of a stream (num_shards must not exceed ``stream_shards``), or of
+    the rows in the cache, which are split into equal parts.
     """
-    from datasets import load_dataset
-
-    streaming = hf_cache_dir is None
-    dataset = load_dataset(
-        corpus.dataset,
-        name=corpus.name,
-        split=corpus.split,
-        streaming=streaming,
-        revision=revision,
-        cache_dir=None if hf_cache_dir is None else str(hf_cache_dir),
-    )
+    dataset = _load_split(corpus, revision, hf_cache_dir)
     splits = dataset.info.splits
     total = splits[corpus.split].num_examples if splits else None
+    if shard is not None:
+        num_shards, index = shard
+        dataset = dataset.shard(num_shards=num_shards, index=index, contiguous=True)
+        if hf_cache_dir is not None:
+            total = len(dataset)
+        elif num_shards > 1:
+            total = None
     rows = iter(dataset)
     try:
         yield rows, total
