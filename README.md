@@ -24,6 +24,8 @@ corpus-tools = { git = "https://github.com/gokamoda/corpus-tools.git", rev = "<c
 corpus-tools sample --corpus openwebtext --num-samples 10000
 corpus-tools sample --corpus tinystories --split validation --num-samples 1000
 corpus-tools sample --corpus wikipedia --name 20231101.ja --num-samples 10000 --max-chars 2000
+# 保存先のファイルと、読むデータセットの commit を指定する場合
+corpus-tools sample --corpus openwebtext --num-samples 10000 --revision 79d93d786212f7344586290adb811d4ae6a1762c --output data/openwebtext/train_hash_n10000.jsonl
 ```
 
 ```python

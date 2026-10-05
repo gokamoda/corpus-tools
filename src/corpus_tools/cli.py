@@ -4,7 +4,13 @@ import argparse
 from pathlib import Path
 
 from corpus_tools.corpus import PRESETS, preset, run_and_exit
-from corpus_tools.store import ALL, DEFAULT_CACHE_DIR, Store, hub_model_id
+from corpus_tools.store import (
+    ALL,
+    DEFAULT_CACHE_DIR,
+    Store,
+    hub_model_id,
+    make_sample,
+)
 
 
 def _add_common_args(parser: argparse.ArgumentParser) -> None:
@@ -41,6 +47,18 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Store only the first MAX_CHARS characters of each text "
         "(the hash is of the full text).",
+    )
+    sample.add_argument(
+        "--revision",
+        default=None,
+        help="Commit of the dataset's Hub repository to read (default: the latest).",
+    )
+    sample.add_argument(
+        "--output",
+        type=Path,
+        default=None,
+        help="File to save the sample to (overwritten), instead of the "
+        "cache directory.",
     )
     sample.add_argument(
         "--cache-corpus",
@@ -93,12 +111,23 @@ def main(argv: list[str] | None = None) -> None:
     store = Store(args.cache_dir)
     corpus = preset(args.corpus, split=args.split, name=args.name)
     if args.command == "sample":
-        path = store.sample(
-            corpus,
-            args.num_samples,
-            max_chars=args.max_chars,
-            cache_corpus=args.cache_corpus,
-        )
+        if args.output is None:
+            path = store.sample(
+                corpus,
+                args.num_samples,
+                max_chars=args.max_chars,
+                cache_corpus=args.cache_corpus,
+                revision=args.revision,
+            )
+        else:
+            path = make_sample(
+                corpus,
+                args.num_samples,
+                args.output,
+                revision=args.revision,
+                max_chars=args.max_chars,
+                hf_cache_dir=store.hf_cache_dir if args.cache_corpus else None,
+            )
         print(f"sample: {path}")
         return
 

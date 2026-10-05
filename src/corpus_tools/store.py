@@ -71,6 +71,50 @@ def _corpus_meta(corpus: Corpus) -> dict[str, Any]:
     }
 
 
+def make_sample(
+    corpus: Corpus,
+    num_samples: int,
+    output_path: Path,
+    *,
+    revision: str | None = None,
+    max_chars: int | None = None,
+    hf_cache_dir: Path | None = None,
+) -> Path:
+    """Read the whole split once and save its hash sample to ``output_path``.
+
+    ``revision`` pins the dataset to a commit (default: the latest, which is
+    recorded). Writes ``output_path`` (overwritten if it exists) and the meta
+    file next to it (``.meta.json``).
+    """
+    revision = revision or dataset_revision(corpus)
+    with open_rows(corpus, revision=revision, hf_cache_dir=hf_cache_dir) as (
+        rows,
+        total,
+    ):
+        num_rows = save_hash_sample(
+            rows,
+            output_path,
+            num_samples=num_samples,
+            key_field=corpus.text_field,
+            max_chars=max_chars,
+            total=total,
+        )
+    _write_json(
+        output_path.with_suffix(".meta.json"),
+        {
+            **_corpus_meta(corpus),
+            "dataset_revision": revision,
+            "method": "hash",
+            "num_samples": num_samples,
+            "max_chars": max_chars,
+            "num_rows": num_rows,
+            "corpus_tools_version": version("corpus-tools"),
+            "created": _now(),
+        },
+    )
+    return output_path
+
+
 class Store:
     def __init__(self, cache_dir: str | Path = DEFAULT_CACHE_DIR):
         self.cache_dir = Path(cache_dir).expanduser()
@@ -97,35 +141,31 @@ class Store:
         *,
         max_chars: int | None = None,
         cache_corpus: bool = False,
+        revision: str | None = None,
     ) -> Path:
-        """Path of the hash sample, made first if it does not exist."""
+        """Path of the hash sample, made first if it does not exist.
+
+        ``revision`` pins the dataset to a commit (default: the latest). A
+        saved sample of another revision is refused, as it has the same path.
+        """
         path = self.sample_path(corpus, num_samples, max_chars)
         if path.exists():
+            meta_path = path.with_suffix(".meta.json")
+            saved = json.loads(meta_path.read_text()) if meta_path.exists() else {}
+            if revision is not None and saved.get("dataset_revision") != revision:
+                raise ValueError(
+                    f"{path} was made from revision {saved.get('dataset_revision')}, "
+                    f"not {revision}"
+                )
             return path
-        revision = dataset_revision(corpus)
-        with self._open_rows(corpus, revision, cache_corpus) as (rows, total):
-            num_rows = save_hash_sample(
-                rows,
-                path,
-                num_samples=num_samples,
-                key_field=corpus.text_field,
-                max_chars=max_chars,
-                total=total,
-            )
-        _write_json(
-            path.with_suffix(".meta.json"),
-            {
-                **_corpus_meta(corpus),
-                "dataset_revision": revision,
-                "method": "hash",
-                "num_samples": num_samples,
-                "max_chars": max_chars,
-                "num_rows": num_rows,
-                "corpus_tools_version": version("corpus-tools"),
-                "created": _now(),
-            },
+        return make_sample(
+            corpus,
+            num_samples,
+            path,
+            revision=revision,
+            max_chars=max_chars,
+            hf_cache_dir=self.hf_cache_dir if cache_corpus else None,
         )
-        return path
 
     # counts
 

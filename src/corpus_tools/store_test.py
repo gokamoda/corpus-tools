@@ -160,3 +160,40 @@ def test_saved_counts_of_another_vocabulary_are_refused(tmp_path, reads):
     assert (
         len(store.counts(CORPUS, LargerTokenizer(), [1], tokenizer_name="c27")[1]) == 27
     )
+
+
+def test_make_sample_to_a_given_file_at_a_revision(tmp_path, reads):
+    from corpus_tools.store import make_sample
+
+    path = make_sample(CORPUS, 3, tmp_path / "out" / "s.jsonl", revision="r1")
+    assert path == tmp_path / "out" / "s.jsonl"
+    assert [json.loads(line) for line in path.open()] == hash_sample(
+        [{"text": t, "i": i} for i, t in enumerate(TEXTS)], num_samples=3
+    )
+    assert (
+        json.loads((tmp_path / "out" / "s.meta.json").read_text())["dataset_revision"]
+        == "r1"
+    )
+    assert reads[-1]["revision"] == "r1"
+
+
+def test_sample_of_another_revision_is_refused(tmp_path, reads):
+    store = Store(tmp_path)
+    store.sample(CORPUS, 3, revision="r1")
+    assert store.sample(CORPUS, 3, revision="r1") == store.sample_path(CORPUS, 3)
+    with pytest.raises(ValueError, match="r1"):
+        store.sample(CORPUS, 3, revision="r2")
+    assert len(reads) == 1
+
+
+def test_cli_sample_with_output_and_revision(tmp_path, reads, monkeypatch):
+    from corpus_tools import cli
+
+    monkeypatch.setattr(cli, "preset", lambda *args, **kwargs: CORPUS)
+    output = tmp_path / "data" / "sample.jsonl"
+    cli.main(
+        ["sample", "--corpus", "openwebtext", "--num-samples", "3",
+         "--revision", "r9", "--output", str(output), "--cache-dir", str(tmp_path)]
+    )  # fmt: skip
+    assert len(output.read_text().splitlines()) == 3
+    assert reads[-1] == {"revision": "r9", "hf_cache_dir": None}
