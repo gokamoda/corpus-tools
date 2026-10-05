@@ -749,28 +749,27 @@ def _run(
     tqdm.set_lock(lock)
     # an executor, not a Pool: a Pool restarts a worker that dies on starting
     # (a script without `if __name__ == "__main__":`) forever, and hangs
-    with ProcessPoolExecutor(
+    executor = ProcessPoolExecutor(
         processes,
         mp_context=context,
         initializer=_init_worker,
         initargs=(tokenizer, threads, positions, lock),
-    ) as executor:
-        try:
-            futures = [executor.submit(_count_shard_in_worker, task) for task in tasks]
-            for future in as_completed(futures):
-                future.result()
-                progress.update()
-        except BrokenProcessPool as error:
-            raise RuntimeError(
-                "A worker process ended. If counting from a script with "
-                'cpus or num_workers, run it under `if __name__ == "__main__":`, '
-                "since every worker imports the script."
-            ) from error
-        finally:
-            # shards not started are dropped; the executor then waits for
-            # the ones being counted
-            executor.shutdown(wait=False, cancel_futures=True)
-            progress.close()
+    )
+    try:
+        futures = [executor.submit(_count_shard_in_worker, task) for task in tasks]
+        for future in as_completed(futures):
+            future.result()
+            progress.update()
+    except BrokenProcessPool as error:
+        raise RuntimeError(
+            "A worker process ended. If counting from a script with "
+            'cpus or num_workers, run it under `if __name__ == "__main__":`, '
+            "since every worker imports the script."
+        ) from error
+    finally:
+        # drop the shards not started, and wait for the ones being counted
+        executor.shutdown(wait=True, cancel_futures=True)
+        progress.close()
 
 
 def _head(
