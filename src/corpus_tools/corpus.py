@@ -137,6 +137,10 @@ def run_and_exit(main: Callable[[], object]) -> NoReturn:
     0, the code of SystemExit, 130 for Ctrl-C, or 1 for an exception (whose
     traceback is printed), and output is flushed before os._exit. Files must
     be closed by the command itself, since atexit hooks do not run.
+
+    Only the clean-up of multiprocessing is run: it removes the semaphores
+    made by tqdm's lock and by counting in processes, which its resource
+    tracker would otherwise report as leaked (and remove itself).
     """
     try:
         main()
@@ -152,7 +156,18 @@ def run_and_exit(main: Callable[[], object]) -> NoReturn:
     except BaseException:
         traceback.print_exc()
         status = 1
+    _clean_up_multiprocessing()
     logging.shutdown()
     sys.stdout.flush()
     sys.stderr.flush()
     os._exit(status)
+
+
+def _clean_up_multiprocessing() -> None:
+    import multiprocessing.util
+
+    # not public; if it goes away, only the warning about leaked semaphores
+    # comes back
+    run_finalizers = getattr(multiprocessing.util, "_run_finalizers", None)
+    if run_finalizers is not None:
+        run_finalizers()

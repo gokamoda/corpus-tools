@@ -54,3 +54,23 @@ def test_run_and_exit(body, status, stderr):
     assert result.returncode == status
     assert stderr in result.stderr
     assert "not reached" not in result.stdout
+
+
+def test_run_and_exit_leaves_no_semaphore_of_tqdm():
+    code = (
+        "from tqdm import tqdm\n"
+        "from corpus_tools.corpus import run_and_exit\n"
+        "def main():\n"
+        "    for _ in tqdm(range(3)):\n"
+        "        pass\n"
+        "run_and_exit(main)\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        check=False,
+    )
+    assert result.returncode == 0
+    assert "leaked semaphore" not in result.stderr
