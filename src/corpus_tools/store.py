@@ -105,6 +105,7 @@ def make_sample(
     *,
     revision: str | None = None,
     max_chars: int | None = None,
+    min_chars: int | None = None,
     hf_cache_dir: Path | None = None,
 ) -> Path:
     """Read the whole split once and save its hash sample to ``output_path``.
@@ -127,6 +128,7 @@ def make_sample(
             num_samples=num_samples,
             key_field=corpus.text_field,
             max_chars=max_chars,
+            min_chars=min_chars,
             total=total,
         )
     _write_json(
@@ -137,6 +139,7 @@ def make_sample(
             "method": "hash",
             "num_samples": num_samples,
             "max_chars": max_chars,
+            "min_chars": min_chars,
             "num_rows": num_rows,
             "corpus_tools_version": version("corpus-tools"),
             "created": _now(),
@@ -164,9 +167,13 @@ class Store:
     # samples
 
     def sample_path(
-        self, corpus: Corpus, num_samples: int, max_chars: int | None = None
+        self,
+        corpus: Corpus,
+        num_samples: int,
+        max_chars: int | None = None,
+        min_chars: int | None = None,
     ) -> Path:
-        name = sample_name(num_samples, max_chars)
+        name = sample_name(num_samples, max_chars, min_chars)
         return self.corpus_dir(corpus) / "samples" / f"{name}.jsonl"
 
     def sample(
@@ -175,6 +182,7 @@ class Store:
         num_samples: int,
         *,
         max_chars: int | None = None,
+        min_chars: int | None = None,
         cache: SampleCacheMode = "none",
         revision: str | None = None,
     ) -> Path:
@@ -187,7 +195,7 @@ class Store:
         """
         if cache not in ("none", "corpus"):
             raise ValueError(f"Unknown cache mode {cache!r} for a sample")
-        path = self.sample_path(corpus, num_samples, max_chars)
+        path = self.sample_path(corpus, num_samples, max_chars, min_chars)
         if path.exists():
             meta_path = path.with_suffix(".meta.json")
             saved = json.loads(meta_path.read_text()) if meta_path.exists() else {}
@@ -199,6 +207,7 @@ class Store:
             path,
             revision=revision,
             max_chars=max_chars,
+            min_chars=min_chars,
             hf_cache_dir=self.hf_cache_dir if cache == "corpus" else None,
         )
 

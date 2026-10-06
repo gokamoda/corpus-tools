@@ -79,6 +79,15 @@ def test_max_chars_cuts_text_but_hashes_the_full_text():
     assert all(row["text"] == f["text"][:12] for row, f in zip(cut, full))
 
 
+def test_min_chars_keeps_the_long_rows_of_the_sample_in_order():
+    rows = make_rows(200)  # the text of row i has 10 + i characters or more
+    full = hash_sample(rows, num_samples=200)
+    long = hash_sample(rows, num_samples=30, min_chars=100)
+    assert long == [row for row in full if len(row["text"]) >= 100][:30]
+    with pytest.raises(ValueError):
+        hash_sample(rows, num_samples=3, min_chars=0)
+
+
 def test_save_and_load(tmp_path):
     path = tmp_path / "sample.jsonl"
     rows = make_rows(100)

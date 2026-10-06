@@ -24,9 +24,14 @@ corpus-tools = { git = "https://github.com/gokamoda/corpus-tools.git", rev = "<c
 corpus-tools sample --corpus openwebtext --num-samples 10000 --output-dir ~/corpus-tools
 corpus-tools sample --corpus tinystories --split validation --num-samples 1000 --output-dir ~/corpus-tools
 corpus-tools sample --corpus wikipedia --name 20231101.ja --num-samples 10000 --max-chars 2000 --output-dir ~/corpus-tools
+# 3,000 文字未満の文書を除いてからサンプルする場合（hash_n10000_min3000.jsonl）
+corpus-tools sample --corpus wikipedia --name 20231101.en --num-samples 10000 --min-chars 3000 --output-dir ~/corpus-tools
 # 保存先のファイルと、読むデータセットの commit を指定する場合
 corpus-tools sample --corpus openwebtext --num-samples 10000 --revision 79d93d786212f7344586290adb811d4ae6a1762c --output data/openwebtext/train_hash_n10000.jsonl
 ```
+
+- `--max-chars N`: 各文書の先頭 N 文字だけを保存する（hash は全文から作る）。
+- `--min-chars N`: N 文字未満の文書を除いてからサンプルする。結果は、`--min-chars` なしのサンプルから N 文字未満の文書を除いたものと、同じ順番になる。トークン数で絞りたいときは、1 トークンあたりの文字数から余裕を持って N を決め、使う側でトークン数でも絞る。英語の Wikipedia と OpenWebText では、GPT-2・Llama・Qwen・Gemma・SmolLM2 の tokenizer で、1 トークンはおよそ 4〜5 文字（99% 点で 5.5 文字、最大で 6.3 文字）。L トークン以上を残したいなら `--min-chars` を 6L 程度にすると、ほぼすべてが L トークン以上になる。
 
 ```python
 from corpus_tools import Store, preset, load_hash_sample

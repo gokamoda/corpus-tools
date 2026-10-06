@@ -15,7 +15,9 @@ Every row gets the key sha256(row[key_field]), and the sample is the
 
 The whole dataset is read once, but only ``num_samples`` rows are kept in
 memory. The key is computed from the full text; ``max_chars`` only shortens
-the text that is stored.
+the text that is stored. With ``min_chars``, rows whose text is shorter are
+left out before sampling; the sample is then the rows of the sample without
+``min_chars`` that are long enough, in the same order.
 
 This is the sampling of inseg-attention and lm-detokenization; the saved files
 are byte-identical to theirs.
@@ -48,22 +50,28 @@ def hash_sample(
     *,
     key_field: str = "text",
     max_chars: int | None = None,
+    min_chars: int | None = None,
 ) -> list[dict[str, Any]]:
     """Return the ``num_samples`` rows with the smallest hash keys, sorted by key.
 
     Each returned row has an extra field "hash" holding its key. With
     ``max_chars``, ``row[key_field]`` is cut to its first ``max_chars``
-    characters after hashing.
+    characters after hashing. With ``min_chars``, rows whose
+    ``row[key_field]`` has fewer characters are skipped.
     """
     if num_samples < 1:
         raise ValueError("num_samples must be at least 1")
     if max_chars is not None and max_chars < 1:
         raise ValueError("max_chars must be at least 1")
+    if min_chars is not None and min_chars < 1:
+        raise ValueError("min_chars must be at least 1")
 
     # max-heap of the smallest keys seen so far: (negated key, key, row)
     heap: list[tuple[int, str, dict[str, Any]]] = []
     kept_keys: set[str] = set()
     for row in rows:
+        if min_chars is not None and len(row[key_field]) < min_chars:
+            continue
         key = hash_key(row[key_field])
         if key in kept_keys:
             continue
@@ -90,6 +98,7 @@ def save_hash_sample(
     *,
     key_field: str = "text",
     max_chars: int | None = None,
+    min_chars: int | None = None,
     total: int | None = None,
 ) -> int:
     """Write ``hash_sample(rows, ...)`` to ``output_path`` as JSON Lines.
@@ -101,6 +110,7 @@ def save_hash_sample(
         num_samples=num_samples,
         key_field=key_field,
         max_chars=max_chars,
+        min_chars=min_chars,
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = output_path.with_name(output_path.name + ".tmp")
@@ -140,7 +150,10 @@ def iter_hash_fold(
                 yield row
 
 
-def sample_name(num_samples: int, max_chars: int | None = None) -> str:
+def sample_name(
+    num_samples: int, max_chars: int | None = None, min_chars: int | None = None
+) -> str:
     """Name of a hash sample, used for its file and as a count source."""
+    minimum = f"_min{min_chars}" if min_chars is not None else ""
     chars = f"_chars{max_chars}" if max_chars is not None else ""
-    return f"hash_n{num_samples}{chars}"
+    return f"hash_n{num_samples}{minimum}{chars}"

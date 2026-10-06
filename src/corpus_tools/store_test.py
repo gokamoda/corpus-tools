@@ -232,6 +232,18 @@ def test_sample_of_another_revision_is_refused(tmp_path, reads):
     assert len(reads) == 1
 
 
+def test_min_chars_is_in_the_name_and_meta(tmp_path, reads):
+    store = make_store(tmp_path)
+    path = store.sample(CORPUS, 2, min_chars=3, max_chars=5)
+    assert path.name == "hash_n2_min3_chars5.jsonl"
+    rows = [json.loads(line) for line in path.open()]
+    long = [{"text": t, "i": i} for i, t in enumerate(TEXTS) if len(t) >= 3]
+    assert [row["hash"] for row in rows] == [
+        row["hash"] for row in hash_sample(long, num_samples=2)
+    ]
+    assert json.loads(path.with_suffix(".meta.json").read_text())["min_chars"] == 3
+
+
 def test_cli_sample_with_output_and_revision(tmp_path, reads, monkeypatch):
     from corpus_tools import cli
 

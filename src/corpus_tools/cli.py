@@ -77,6 +77,14 @@ def build_parser() -> argparse.ArgumentParser:
         "(the hash is of the full text).",
     )
     sample.add_argument(
+        "--min-chars",
+        type=int,
+        default=None,
+        help="Leave out texts shorter than MIN_CHARS characters before sampling "
+        "(the sample is then the long enough rows of the sample without it, in "
+        "the same order).",
+    )
+    sample.add_argument(
         "--output",
         type=Path,
         default=None,
@@ -147,6 +155,7 @@ def main(argv: list[str] | None = None) -> None:
             args.output,
             revision=args.revision,
             max_chars=args.max_chars,
+            min_chars=args.min_chars,
             hf_cache_dir=hf_cache_dir if args.cache == "corpus" else None,
         )
         print(f"sample: {path}")
@@ -159,6 +168,7 @@ def main(argv: list[str] | None = None) -> None:
             corpus,
             args.num_samples,
             max_chars=args.max_chars,
+            min_chars=args.min_chars,
             cache=args.cache,
             revision=args.revision,
         )
